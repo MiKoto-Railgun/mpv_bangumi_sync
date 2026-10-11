@@ -14,7 +14,8 @@ local json_store = require "src.core.json_store"
 local episode_status = require "src.services.episode_status"
 local title_guess = require "src.title_guess"
 local input = require "mp.input"
-local ui_menu = require "src.ui_menu"
+local ui_menu = require "src.UI.uosc_menu"
+local ui_info = require "src.UI.draw_menu"
 local manual_binding = require "src.services.manual_binding"
 local PendingBgmEpisodes = nil
 local BgmEpisodeMenuSerial = 0
@@ -79,6 +80,13 @@ local function sync_legacy_globals_from_current_ep_context()
   EpisodesReady = context.episodes_ready == true
   StorageConfig = context.storage
   CurrentEpisodeWatched = context.watched == true
+
+  -- 桥接: 把同步结果喂给番剧信息面板
+  local episode_id = CurrentEpisodeInfo and tonumber(CurrentEpisodeInfo.episodeId)
+  local anime_id = (AnimeInfo and AnimeInfo.animeId)
+        or (CurrentEpisodeInfo and CurrentEpisodeInfo.animeId)
+        or (episode_id and math.floor(episode_id / 10000))
+  ui_info.notify_match(anime_id, episode_id)
 end
 
 local function reset_current_ep_context()

@@ -230,6 +230,10 @@ local function build_info_menu_props(state)
       },
       actions_place = "inside" },
     {
+      title = "番剧信息面板",
+      value = { "script-message-to", mp.get_script_name(), "bgm-info-panel", "toggle" },
+      selectable = true },
+    {
       title = "打开Bangumi",
       value = { "script-message", "open-bangumi-url" },
       selectable = true},
