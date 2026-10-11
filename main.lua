@@ -723,6 +723,10 @@ mark_current_episode_status = function(opts)
     return false
   end
 
+  if result.collection_completed then
+    context.episodes_data.collection = context.episodes_data.collection or {}
+    context.episodes_data.collection.type = 2
+  end
   local local_updated = update_local_episode_status(context, context.episode_item, status)
   if not local_updated then
     refresh_current_ep_context(true)
