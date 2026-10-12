@@ -230,7 +230,7 @@ local function build_info_menu_props(state)
       },
       actions_place = "inside" },
     {
-      title = "番剧信息面板",
+      title = "番剧信息",
       value = { "script-message-to", mp.get_script_name(), "bgm-info-panel", "toggle" },
       selectable = true },
     {
