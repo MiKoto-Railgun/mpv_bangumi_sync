@@ -216,6 +216,12 @@ function M.update_user_collection(subject_id, status, private)
   )
 end
 
+-- 仅更新已有收藏的状态。
+function M.update_user_collection_status(subject_id, status)
+  -- 只修改状态，保留隐私、评分、标签和短评。
+  return M.patch(string.format("/v0/users/-/collections/%d", subject_id), {type = status})
+end
+
 -- 拉取所有分页；任一页失败时不返回不完整列表。
 local function get_all_pages(uri, params)
   local data = {}

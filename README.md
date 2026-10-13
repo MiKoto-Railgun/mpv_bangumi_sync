@@ -25,6 +25,7 @@
 - 播放进度达到阈值后自动标记当前集为“已看”
 - 支持批量标记，减少连续观看多集时的 Bangumi 时间线刷屏
 - 支持自动点格子开关，禁用后仅展示信息，不自动标记 Bangumi 格子
+- 可选在最后一集同步且全部正片已看后，自动将番剧标记为“看过”（默认关闭）
 - 支持番剧信息窗口，查看当前条目、剧集进度和单集状态
 - 支持手动匹配弹弹play结果，或搜索 Bangumi 条目并选择单集绑定当前视频
 - 支持网络视频播放，根据 URL 自动选择完整文件匹配或流媒体标题匹配
@@ -105,6 +106,7 @@ storage1=/home/user/Anime:/mnt/nas/Anime
 
 ```conf
 enable_auto_mark=yes
+enable_auto_complete=no
 progress_mark_threshold=0.9
 storage1_batch_sync_threshold=1
 storage2_batch_sync_threshold=4
@@ -115,6 +117,7 @@ network_file_hosts=
 ```
 
 - `enable_auto_mark`：是否自动点 Bangumi 格子。设为 `no` 时只展示信息。
+- `enable_auto_complete`：默认 `no`。设为 `yes` 后，最后一集达到播放进度阈值并成功同步（或手动标记为已看）时，若远端全部正片均为已看，自动将番剧标记为“看过”。特别篇、OP、ED 不计入；总话数未知、正片列表不完整或请求失败时不修改番剧状态。使用批量同步时，在包含最后一集的批次实际提交后检查；退出时会等待同步和检查完成，可能增加退出耗时。
 - `progress_mark_threshold`：标记已看的播放进度阈值，`0.9` 表示 90%。
 - `storage*_batch_sync_threshold`：待同步剧集数量达到阈值时批量同步。设为 `0` 时不按数量自动同步，但退出 mpv 或关闭自动点格子时仍会同步。
 - `bangumi_api`：Bangumi API URL，可设置为镜像或兼容 API 地址。必须使用完整 URL，例如 `https://api.bgm.tv`。**请自行确认 API URL 的安全性；因使用第三方 API URL 产生的问题，本插件不负责**
