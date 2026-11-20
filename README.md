@@ -35,6 +35,8 @@
 ![番剧信息](doc/anime-info.png)
 ![番剧信息](doc/anime-info2.png)
 
+![番剧信息](doc/anime-info3.png)
+
 ## 依赖
 
 - curl：用于 HTTP 请求
