@@ -30,7 +30,6 @@ local o = config.panel or {}
 --==============================================================================
 -- 状态
 --==============================================================================
--- 原版第 2 页签实际渲染 标签/别名/外部链接/相关作品, 标签更名为 "更多"
 local TABS = { "概览", "更多", "制作", "剧集" }
 local EP_PER_PAGE = 14 -- 剧集页: 2 列 x 7 行
 
@@ -42,6 +41,9 @@ local cur_ep = nil
 local tab = 1
 local ep_page = 1
 local ep_grid = nil     -- 剧集网格区域 (滚轮判定)
+local ep_watch          -- 全量观看状态 set[episodeId]=true(已看)/false(未看); nil=未获取全部, 不显示
+local watch_raw = {}    -- 各番剧最近一次服务器获取的原始数据缓存 [animeId]=payload
+local watch_loading     -- 观看进度请求进行中: "fetch"=获取 / "refresh"=刷新; nil=空闲
 local buttons = {}
 local hover_name = ""
 local bound_keys = {}
@@ -109,10 +111,9 @@ end
 -- info.json 双格式兼容:
 --  A) anixplayer/dandanplay 聚合格式 (animeTitle/imageUrl/rating=数字/ratingDetails...)
 --  B) Bangumi API subject 原始格式 (name_cn/images.*/rating={score=..}/infobox...)
--- 统一归一化为 A 格式, 渲染层零改动
 local function normalize_info(raw)
     if type(raw) ~= "table" then return nil end
-    if raw.animeTitle then return raw end                       -- 已是 A 格式
+    if raw.animeTitle then return raw end
 
     local d = {}
     d.animeTitle = raw.name_cn or raw.name
@@ -128,10 +129,15 @@ local function normalize_info(raw)
         or (raw.id and ("https://bangumi.tv/subject/" .. tostring(raw.id)) or nil)
     d.date       = raw.date
     d.airDay     = raw.airDay
+    d.eps        = tonumber(raw.eps or raw.total_episodes)
 
     -- rating: {score=7.7, rank=.., count={..}} → 数字
     local r = raw.rating
-    if type(r) == "table" then r = r.score end
+    if type(r) == "table" then
+        d.ratingRank = tonumber(r.rank)
+        d.ratingTotal = tonumber(r.total)
+        r = r.score
+    end
     d.rating = tonumber(r)
 
     -- 分源评分: B 格式没有, 用综合评分合成一项 (评分区不至于空白)
@@ -169,19 +175,56 @@ local function normalize_info(raw)
     return d
 end
 
--- B 格式 info.json 不含剧集列表; 从同目录 episodes.json 补读并统一字段名
 local function load_episodes(aid)
     local root = metadata_root()
     local ep = read_json(fmt("%s/%s/episodes.json", root, aid))
-    if type(ep) == "table" and type(ep.episodes) == "table" then ep = ep.episodes end
+    if not ep then return nil end
+
+    -- 解外层包裹: {episodes=[...]} (弹弹play) | {data=[...]} (Bangumi v0) | 裸数组
+    if type(ep) == "table" then
+        if type(ep.episodes) == "table" then
+            ep = ep.episodes
+        elseif type(ep.data) == "table" then
+            ep = ep.data
+        end
+    end
     if type(ep) ~= "table" or #ep == 0 then return nil end
+
     local out = {}
     for _, e in ipairs(ep) do
         if type(e) == "table" then
-            out[#out + 1] = {
-                episodeId    = tonumber(e.episodeId or e.id),
-                episodeTitle = e.episodeTitle or e.title or e.name_cn or e.name,
-            }
+            local nested = type(e.episode) == "table" and e.episode or nil
+            local id, title, sort
+            if nested then
+                -- Bangumi v0 嵌套格式: {episode={id, name_cn, name, sort, ep}, type=...}
+                sort = tonumber(nested.sort) or tonumber(nested.ep)
+                id = tonumber(nested.id)
+                title = nested.name_cn
+                if not title or title == "" then title = nested.name end
+                if not title or title == "" then
+                    title = sort and ("第" .. tostring(sort) .. "话") or nil
+                else
+                    title = (sort and ("第" .. tostring(sort) .. "话 ") or "") .. title
+                end
+            else
+                -- 弹弹play / Bangumi v0 扁平格式: {episodeId|id, episodeTitle|title|name_cn|name}
+                local function first_non_empty(...)
+                    for i = 1, select("#", ...) do
+                        local v = select(i, ...)
+                        if v ~= nil and v ~= "" then return v end
+                    end
+                    return nil
+                end
+                id = tonumber(e.episodeId or e.id)
+                sort = tonumber(e.sort) or tonumber(e.ep)
+                title = first_non_empty(e.episodeTitle, e.title, e.name_cn, e.name)
+                if not title then
+                    title = sort and ("第" .. tostring(sort) .. "话") or nil
+                end
+            end
+            if id then
+                out[#out + 1] = { episodeId = id, episodeTitle = title or "未命名", sort = sort }
+            end
         end
     end
     return #out > 0 and out or nil
@@ -273,6 +316,8 @@ local cover = ui_cover.create({
     overlay_id = 44,
     res_x = o.res_x,
     res_y = o.res_y,
+    bgm_proxy = config.config and config.config.bgm_proxy or "",
+    bgm_proxy_skip_cert_verify = config.config and config.config.bgm_proxy_skip_cert_verify == true,
     on_redraw = function() render() end,
 })
 
@@ -286,6 +331,99 @@ local function layout()
     PX, PY = (W - PW) / 2, (H - PH) / 2
     CT = PY + 258   -- 内容区顶
     CB = PY + PH - 66 -- 内容区底
+end
+
+-- 观看状态: 服务器(uosc菜单进度项)获取 → 构建全集状态 → 全部确定才启用显示
+local function watch_truthy(v)
+    if type(v) == "table" then return v.watched == true or v.status == 2 or v.watched == 1 end
+    return v == true or v == 1 or v == 2 or v == "watched"
+end
+
+-- 每集 → 集号 (弹弹play watchedEpisodes 以集号为键)
+local function ep_number(e, aidn)
+    local n = tonumber(e.sort) or tonumber(e.ep) or tonumber(e.episodeNumber)
+    if n then return n end
+    local id = tonumber(e.episodeId)
+    if id and aidn and id > aidn * 10000 and id - aidn * 10000 < 10000 then
+        return id - aidn * 10000 -- dandanplay 规律: episodeId = animeId*10000 + 集号
+    end
+    local t = tostring(e.episodeTitle or "")
+    local m = t:match("第%s*(%d+)%s*[话集]") or t:match("^%s*(%d+)")
+    return m and tonumber(m) or nil
+end
+
+-- 由 payload + 剧集列表构建状态; 仅当每集状态均可确定(无 nil)时返回 set, 否则 nil
+local function build_watch(aid, eps, payload)
+    if not eps or #eps == 0 or type(payload) ~= "table" then return nil end
+    local we = payload.watchedEpisodes or payload.watched_episodes
+        or (next(payload) and payload or nil) -- 兼容直接传数组/映射
+    if type(we) ~= "table" then return nil end
+    local nums, map
+    if #we > 0 then -- 集号数组模式 (dandanplay 原始格式)
+        nums = {}
+        for _, v in ipairs(we) do
+            local n = tonumber(type(v) == "table" and (v.episodeId or v.sort) or v)
+            if n then nums[n] = true end
+        end
+    else -- 已映射模式 {[episodeId]=true/false}
+        map = {}
+        for k, v in pairs(we) do
+            local id = tonumber(k)
+            if id then map[id] = watch_truthy(v) end
+        end
+    end
+    if not nums and not map then return nil end
+    local aidn = tonumber(aid)
+    local set, ok = {}, true
+    for _, e in ipairs(eps) do
+        local id = tonumber(e.episodeId)
+        if not id then ok = false break end
+        if map then
+            local st = map[id]
+            if st == nil then ok = false break end -- 缺任一集 → 未获取全部
+            set[id] = st
+        else
+            local n = ep_number(e, aidn)
+            if not n then ok = false break end     -- 集号未知 → 状态 nil → 不启用
+            set[id] = nums[n] == true
+        end
+    end
+    return ok and set or nil
+end
+
+-- 兼容 json_store 不同解析函数命名
+local function json_decode(s)
+    if type(s) ~= "string" or s == "" then return nil end
+    for _, f in ipairs({ "decode", "parse", "loads", "from_json" }) do
+        local fn = json_store[f]
+        if type(fn) == "function" then
+            local ok, res = pcall(fn, s)
+            if ok then return res end
+        end
+    end
+    return nil
+end
+
+-- 收到数据后: 缓存 + 面板开着且同番剧则即时重绘
+local function apply_watch(aid, payload)
+    watch_raw[aid] = payload
+    watch_loading = nil -- 任何进度回包都会结束按钮的请求态
+    if shown and data then
+        -- current.anime_id 与 main.lua 广播(notify_watch)同命名空间, 必须优先比对
+        local cur = tostring(current.anime_id or data.animeId or data.bangumiId or "")
+        if cur == aid then
+            ep_watch = build_watch(aid, data.episodes, payload)
+            render()
+        end
+    end
+end
+
+local function on_watch_msg(arg)
+    local payload = json_decode(arg)
+    if type(payload) == "table" then
+        local aid = tostring(payload.animeId or payload.anime_id or "")
+        if aid ~= "" then apply_watch(aid, payload) end
+    end
 end
 
 -- 评分兼容: 数字 / 数字字符串 / {score=..}|{value=..} 对象 均转为数字, 无效返回 nil
@@ -307,19 +445,21 @@ local function pill(A, x, y, s, opts)
     return ass.push_pill(A, x, y, s, opts)
 end
 
+-- 顶栏：标题+胶囊+关闭按钮
 local function push_header(A)
     local x, ty = PX + 40, PY + 34
-    local title = ass.truncate_w(data.animeTitle or data.searchKeyword or "番剧信息", 34, 880)
+    local title = ass.truncate_w(data.animeTitle or data.searchKeyword or "番剧信息",
+                                 34, math.min(1200 + 280, (PW - 280)))
     ass.push_text(A, x, ty + 24, title, 34, C.text, { align = 4, bold = true })
-    local cx = x + ass.text_width(title, 34) + 18
+    local cx = x + ass.text_width(title, 34) / 1.5 + 50
     if data.typeDescription then
-        local w = pill(A, cx, ty + 6, data.typeDescription,
+        local w = pill(A, cx, ty + 13, data.typeDescription,
             { fs = 18, h = 30, padx = 14, bg = C.accent, bg_a = "10", fg = C.on_accent, bold = true })
         cx = cx + w + 12
     end
     local rt = rating_num(data.rating)
     if rt then
-        pill(A, cx, ty + 6, fmt("★ %.1f", rt),
+        pill(A, cx, ty + 13, fmt("★ %.1f", rt),
             { fs = 18, h = 30, padx = 14, bg = C.gold, bg_a = "10", fg = C.on_gold, bold = true })
     end
     -- 关闭按钮 ✕
@@ -334,6 +474,7 @@ local function push_header(A)
     ass.add_btn(buttons, bx, by, bs, bs, "close", "")
 end
 
+-- 顶栏：副标题
 local function push_subtitle(A)
     local parts, jp, en = {}, nil, nil
     for _, t in ipairs(data.titles or {}) do
@@ -346,28 +487,31 @@ local function push_subtitle(A)
     if al then parts[#parts + 1] = al:gsub("[\r\n]+%s*别名:%s*", " · ") end
     local s = table.concat(parts, " · ")
     if s ~= "" then
-        ass.push_text(A, PX + 40, PY + 100, ass.truncate_w(s, 20, PW - 150), 20, C.sub, { align = 4 })
+        ass.push_text(A, PX + 40, PY + 100,
+                      ass.truncate_w(s, 20, (PW - 40) * 1.3), 20, C.sub, { align = 4 })
     end
 end
 
+-- 顶栏：信息栏（类型 · 放送日期 · 星期 · 电视台）
 local function push_infobar(A)
     local bits = {}
     if data.typeDescription then bits[#bits + 1] = data.typeDescription end
-    local n = md("话数")
+    local n = md("话数") or (data.eps and tostring(data.eps) or nil)
     if n then bits[#bits + 1] = "全 " .. n .. " 话" end
-    local d1 = fmt_date_cn(md("放送开始"))
+    local d1 = fmt_date_cn(md("放送开始")) or data.date
     local d2 = fmt_date_cn(md("播放结束") or md("放送结束"))
     if d1 then bits[#bits + 1] = d1 .. (d2 and (" ~ " .. d2) or "") end
     local wd = md("放送星期")
     if wd then bits[#bits + 1] = (wd:gsub("星期", "周")) .. "放送" end
     local tv = md("播放电视台")
     if tv then bits[#bits + 1] = tv end
-    local s = ass.truncate_w(table.concat(bits, " · "), 21, PW - 150)
+    local s = ass.truncate_w(table.concat(bits, " · "), 21, PW)
     if s ~= "" then
         ass.push_text(A, PX + 40, PY + 138, s, 21, C.faint, { align = 4 })
     end
 end
 
+-- 页签按钮栏
 local function push_tab_btn(A, idx, x, y, h)
     local s, fs, padx = TABS[idx], 22, 24
     local w = ass.text_width(s, fs) + padx * 2
@@ -450,7 +594,7 @@ local function render_overview(A)
     end
 end
 
--- 页签 2: 更多 (标签/别名/链接/相关) -------------------------------------------
+-- 页签 2: 更多 (标签/更多/链接/相关) -------------------------------------------
 local function render_more(A)
     local y = CT
 
@@ -475,7 +619,7 @@ local function render_more(A)
         ass.push_text(A, PX + 40, y + 14, "别名", 19, C.accent, { align = 4, bold = true })
         y = y + 40
         al = al:gsub("[\r\n]+%s*别名:%s*", " · ")
-        local lines = ass.wrap_text(al, 20, PW - 80, 2)
+        local lines = ass.wrap_text(al, 20, (PW - 40) * 1.5, 2)
         for i, ln in ipairs(lines) do
             ass.push_text(A, PX + 40, y + (i - 1) * 30 + 11, ln, 20, "B9C0CE", { align = 4 })
         end
@@ -601,7 +745,29 @@ local function render_episodes(A)
     local total_pages = math.max(1, math.ceil(#eps / EP_PER_PAGE))
     ep_page = math.min(ep_page, total_pages)
     local y = CT
-    ass.push_text(A, PX + 40, y + 14, fmt("剧集列表 · %d 项", #eps), 19, C.accent, { align = 4, bold = true })
+    local watched_n = 0
+    if ep_watch then
+        for _, e in ipairs(eps) do
+            if ep_watch[tonumber(e.episodeId)] then watched_n = watched_n + 1 end
+        end
+    end
+    local head = fmt("剧集列表 · %d 项", #eps)
+    if ep_watch then head = head .. fmt(" · 已看 %d / %d", watched_n, #eps) end
+    ass.push_text(A, PX + 40, y + 14, head, 19, C.accent, { align = 4, bold = true })
+    -- 观看进度按钮: 无进度=获取 / 有进度=刷新 / 请求中=获取中·刷新中 (右侧, 与标题同行)
+    if #eps > 0 then
+        local s = watch_loading and (watch_loading == "refresh" and "刷新中…" or "获取中…")
+            or (ep_watch and "刷新进度" or "获取进度")
+        local fs, h, padx = 17, 32, 14
+        local w = ass.text_width(s, fs) + padx * 2
+        local bx, by = PX + PW - 40 - w, CT + 14 - h / 2
+        local hov = hover_name == ass.btn_name("watch", "sync")
+        ass.push_rect(A, bx, by, w, h, h / 2, hov and C.card_hov or C.card, "00",
+            hov and "4A5468" or C.line, "40", 1)
+        ass.push_text(A, bx + w / 2, by + h / 2, s, fs,
+            watch_loading and C.faint or (hov and C.text or C.sub), { align = 5 })
+        ass.add_btn(buttons, bx, by, w, h, "watch", "sync")
+    end
     y = y + 46
     local cols, cw, ch, gy = 2, (PW - 96) / 2, 46, 10
     if #eps > 0 then
@@ -613,22 +779,36 @@ local function render_episodes(A)
         if not e then break end
         local bx = PX + 40 + (i % cols) * (cw + 16)
         local by = y + math.floor(i / cols) * (ch + gy)
-        local is_cur = cur_ep_id ~= nil and tonumber(e.episodeId) == cur_ep_id
+        local ep_id = tonumber(e.episodeId)
+        local is_cur = cur_ep_id ~= nil and ep_id == cur_ep_id
+        local st = ep_watch and ep_watch[ep_id] -- true=已看 false=未看 nil=未启用
         if is_cur then
             ass.push_rect(A, bx, by, cw, ch, 10, C.accent, "10", C.accent, "00", 1)
-            ass.push_text(A, bx + 18, by + ch / 2, "▶", 16, C.on_accent, { align = 5, bold = true })
-            ass.push_text(A, bx + 40, by + ch / 2,
-                ass.truncate_w(e.episodeTitle or "", 21, cw - 60), 21, C.on_accent, { align = 4, bold = true })
+            ass.push_text(A, bx + 18, by + ch / 2, "▶", 16, C.on_accent, {align = 5, bold = true})
+            local reserve = (st ~= nil) and 116 or 60
+            ass.push_text(A, bx + 40, by + ch / 2, ass.truncate_w(e.episodeTitle or "",
+                          21, cw - reserve), 21, C.on_accent, { align = 4, bold = true })
+            if st == true then
+                ass.push_text(A, bx + cw - 18, by + ch / 2, "✓ 已看", 17, C.on_accent, {align = 6, bold = true})
+            elseif st == false then
+                ass.push_text(A, bx + cw - 18, by + ch / 2, "未看", 17, C.on_accent, {align = 6})
+            end
         else
             ass.push_rect(A, bx, by, cw, ch, 10, C.card, "00", C.line, "30", 1)
-            ass.push_text(A, bx + 18, by + ch / 2,
-                ass.truncate_w(e.episodeTitle or "", 21, cw - 40), 21, "B9C0CE", { align = 4 })
+            local reserve = (st ~= nil) and 78 or 40
+            ass.push_text(A, bx + 18, by + ch / 2, ass.truncate_w(e.episodeTitle or "", 21, cw - reserve),
+                          21, st == true and C.faint or "B9C0CE", { align = 4 })
+            if st == true then
+                ass.push_text(A, bx + cw - 18, by + ch / 2, "✓ 已看", 17, C.accent, {align = 6, bold = true})
+            elseif st == false then
+                ass.push_text(A, bx + cw - 18, by + ch / 2, "未看", 17, C.faint, {align = 6})
+            end
         end
     end
     local fy = CB - 44
     page_btn(A, PX + PW / 2 - 190, fy, "‹ 上一页", "ep_prev")
     page_btn(A, PX + PW / 2 + 100, fy, "下一页 ›", "ep_next")
-    ass.push_text(A, PX + PW / 2, fy + 20, fmt("%d / %d", ep_page, total_pages), 18, C.faint, { align = 5 })
+    ass.push_text(A, PX + PW / 2, fy + 20, fmt("%d / %d", ep_page, total_pages), 18, C.faint, {align = 5})
 end
 
 --==============================================================================
@@ -687,7 +867,8 @@ local function open_url(url)
     else
         args = { "xdg-open", url }
     end
-    mp_utils.subprocess({ args = args, playback_only = false, cancellable = false })
+    mp.command_native_async({ name = "subprocess", args = args, playback_only = false },
+        function() end)
 end
 
 local function hide()
@@ -701,6 +882,14 @@ local function hide()
     if overlay then overlay:remove() end
     cover.remove()
     mp.commandv("script-message", "osc-show")
+end
+
+-- 请求获取/刷新观看进度 (经 main.lua 的 bgm-fetch-watch-status, 结果由 notify_watch 回流)
+local function request_watch_sync()
+    if watch_loading then return end
+    watch_loading = ep_watch and "refresh" or "fetch"
+    render()
+    mp.commandv("script-message", "bgm-fetch-watch-status", watch_loading)
 end
 
 local function on_click()
@@ -731,6 +920,8 @@ local function on_click()
         end
     elseif kind == "link" and arg ~= "" then
         open_url(arg)
+    elseif kind == "watch" and arg == "sync" then
+        request_watch_sync()
     elseif kind == "cover" and arg == "retry" then
         cover.retry()
         render()
@@ -743,7 +934,7 @@ local function switch_tab(dir)
     render()
 end
 
--- 滚轮: 悬在剧集网格内 → 翻页; 其余任何位置 → 切换页签
+-- 滚轮: 剧集列表多于 1 页且悬在网格内 → 翻页; 其余任何情况 → 切换页签
 local function on_wheel(dir)
     if not shown then return end
     if tab == 4 and ep_grid then
@@ -753,12 +944,14 @@ local function on_wheel(dir)
             if cx and cx >= ep_grid.x and cx <= ep_grid.x + ep_grid.w
                 and cy >= ep_grid.y and cy <= ep_grid.y + ep_grid.h then
                 local tp = math.max(1, math.ceil(#(data.episodes or {}) / EP_PER_PAGE))
-                local np = ep_page + dir
-                if np >= 1 and np <= tp then
-                    ep_page = np
-                    render()
+                if tp > 1 then -- 仅一页时不拦截, 落到全局滚动
+                    local np = ep_page + dir
+                    if np >= 1 and np <= tp then
+                        ep_page = np
+                        render()
+                    end
+                    return
                 end
-                return
             end
         end
     end
@@ -779,6 +972,12 @@ local function show(forced_id, silent)
         end
         return
     end
+    -- 自然打开: 优先用与广播同命名空间的匹配 ID;
+    -- forced_id 打开(指定了另一个番剧): 信任 JSON 自身标识, 防止误用播放中番剧的匹配 ID
+    local aid = (forced_id and forced_id ~= "")
+                and tostring(data.animeId or data.bangumiId or "")
+                or tostring(current.anime_id or data.animeId or data.bangumiId or "")
+    ep_watch = (aid ~= "") and build_watch(aid, data.episodes, watch_raw[aid]) or nil
     tab, ep_page, hover_name = 1, 1, ""
     shown = true
     mp.commandv("script-message", "osc-hide")
@@ -836,6 +1035,7 @@ local on_message = function(cmd, arg)
     if cmd == "show" then show(arg)
     elseif cmd == "hide" then hide()
     elseif cmd == "debug" then debug_dump()
+    elseif cmd == "watch" then on_watch_msg(arg)
     else toggle() end
 end
 mp.register_script_message("bgm-info-panel", on_message)
@@ -866,6 +1066,7 @@ mp.register_event("file-loaded", function()
 end)
 
 mp.register_event("shutdown", hide)
+mp.register_event("end-file", hide)
 
 --==============================================================================
 -- 集成接口 (main.lua 调用)
@@ -878,6 +1079,16 @@ function M.notify_match(anime_id, episode_id)
     if o.auto_show and not shown and current.anime_id then
         if load_for_current() and cur_ep then show(nil, true) end
     end
+end
+
+function M.notify_watch(anime_id, payload)
+    local aid = tostring(anime_id or "")
+    if aid ~= "" and type(payload) == "table" then apply_watch(aid, payload) end
+end
+
+function M.notify_watch_failed()
+    watch_loading = nil
+    if shown then render() end
 end
 
 M.show = function(forced_id, silent) show(forced_id, silent) end

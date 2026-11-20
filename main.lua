@@ -910,6 +910,28 @@ local function get_episode_list_cached(context)
   end
 end
 
+function broadcast_watch_status(context, episodes)
+    if not context or not context.bgm_id or type(episodes) ~= "table" then return end
+    local coll_watched = episode_status.collection_is_watched(episodes.collection)
+    local watched = {}
+    for _, it in ipairs(episodes.data or {}) do
+        local ep = it.episode
+        if type(ep) == "table" then
+            local st = tonumber(it.type)
+            if tonumber(ep.type) == 0 and coll_watched then st = 2 end -- 与单集列表菜单同规则
+            if st == 2 then
+                watched[#watched + 1] = tonumber(ep.sort) or tonumber(ep.ep)
+            end
+        end
+    end
+    -- animeId 与 notify_match 保持同一命名空间 (弹弹play ID)
+    local anime_id = (AnimeInfo and AnimeInfo.animeId)
+        or (CurrentEpisodeInfo and CurrentEpisodeInfo.animeId)
+        or (context.runtime_episode_id and math.floor(context.runtime_episode_id / 10000))
+        or context.bgm_id
+    ui_info.notify_watch(tostring(anime_id), { watchedEpisodes = watched })
+end
+
 mp.register_script_message("bgm-open-episode-list", function()
   if not UoscAvailable then return end
   cancel_episode_list()
@@ -924,6 +946,7 @@ mp.register_script_message("bgm-open-episode-list", function()
   if cached then
     state.EpisodesData = cached
     ui_menu.show_episode_list(state, cached)
+    broadcast_watch_status(context, cached)
     return
   end
   state.EpisodeListRequest = request
@@ -946,11 +969,52 @@ mp.register_script_message("bgm-open-episode-list", function()
     state.EpisodesData = episodes
     state.EpisodeListFailed = episodes == nil
     ui_menu.show_episode_list(state, episodes, "加载失败，请重试", true)
+    broadcast_watch_status(context, episodes)
   end, {all_types = context.episode_info and context.episode_info.manualEpisode == true})
 end)
 
 mp.register_script_message("bgm-cancel-episode-list", function(request)
   if tonumber(request) == EpisodeListRequest then cancel_episode_list() end
+end)
+
+mp.register_script_message("bgm-fetch-watch-status", function(mode)
+    local context = CurrentEpContext
+    if not context or not context.bgm_id then
+        ui_info.notify_watch_failed()
+        mp.osd_message("尚未匹配番剧，无法获取观看进度", 2)
+        return
+    end
+    -- 面板无进度("获取"): 本地缓存秒回; 已有进度("刷新"): 直接拉服务器最新
+    if mode ~= "refresh" then
+        local cached = get_episode_list_cached(context)
+        if cached then
+            broadcast_watch_status(context, cached)
+            return
+        end
+    end
+    cancel_episode_list()
+    local request = EpisodeListRequest
+    CancelEpisodeList = bangumi_api.get_user_episodes_async(context.bgm_id, function(episodes)
+        if CurrentEpContext ~= context or EpisodeListRequest ~= request then return end
+        CancelEpisodeList = nil
+        EpisodeListRequest = EpisodeListRequest + 1
+        if episodes then
+            context.episodes_data = episodes
+            if context.episodes_path then
+                json_store.write(context.episodes_path, episodes, {atomic = true})
+            end
+            broadcast_watch_status(context, episodes)
+        else
+            -- 失败: "获取"回退本地缓存, "刷新"保留旧显示
+            local fallback = (mode ~= "refresh") and get_episode_list_cached(context) or nil
+            if fallback then
+                broadcast_watch_status(context, fallback)
+            else
+                ui_info.notify_watch_failed()
+                mp.osd_message("获取观看进度失败，请稍后重试", 2)
+            end
+        end
+    end, {all_types = context.episode_info and context.episode_info.manualEpisode == true})
 end)
 
 mp.register_script_message("bgm-info-menu-event", function(payload)

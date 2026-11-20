@@ -220,24 +220,25 @@ local function build_info_menu_props(state)
         { name = "refresh", icon = "refresh", label = "根据当前匹配的番剧Id，重新获取单集信息" },
       },
       actions_place = "inside" },
-    {
-      title = "自动点格子：" .. AutoMarkText,
-      value = { "script-message-to", mp.get_script_name(), "bgm-toggle-auto-mark" },
-      selectable = true,
-      keep_open = true,
-      actions = {
-        { name = "toggle_auto_mark", icon = AutoMarkIcon, label = "切换自动点格子" },
-      },
-      actions_place = "inside" },
-    {
-      title = "番剧信息",
-      value = { "script-message-to", mp.get_script_name(), "bgm-info-panel", "toggle" },
-      selectable = true },
-    {
-      title = "打开Bangumi",
-      value = { "script-message", "open-bangumi-url" },
-      selectable = true},
   }
+  -- 【修改】以下三项仅在已匹配到番剧时插入
+  local is_matched = type(CurrentEpisodeInfo) == "table" and CurrentEpisodeInfo.episodeId ~= nil
+  if is_matched then
+    items[#items + 1] = {
+      title = "自动点格子：" .. AutoMarkText, selectable = true, keep_open = true,
+      value = { "script-message-to", mp.get_script_name(), "bgm-toggle-auto-mark" },
+      actions = { { name = "toggle_auto_mark", icon = AutoMarkIcon, label = "切换自动点格子" }, },
+      actions_place = "inside",
+    }
+    items[#items + 1] = {
+      title = "番剧信息", selectable = true,
+      value = { "script-message-to", mp.get_script_name(), "bgm-info-panel", "toggle" },
+    }
+    items[#items + 1] = {
+      title = "打开Bangumi", selectable = true,
+      value = { "script-message", "open-bangumi-url" },
+    }
+end
   if EpisodeListMenu then
     -- 保留进度栏的位置与文字，由 uosc 在右侧展开子菜单。
     EpisodeListMenu.title = items[3].title

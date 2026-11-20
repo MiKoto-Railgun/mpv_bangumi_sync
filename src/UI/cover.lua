@@ -93,11 +93,25 @@ local function cover_round(src_path, dst_path, w, h, m, r, panel_hex)
     return true
 end
 
+-- 判断封面 URL 是否属于 Bangumi 图片域名（bgm.tv / bangumi.tv 及其子域）
+local function is_bangumi_image_url(url)
+    if type(url) ~= "string" then return false end
+    local host = url:match("^%a[%w.+-]-://([^/:?#]+)")
+    if not host then return false end
+    host = host:lower()
+    if host == "bgm.tv" or host == "bangumi.tv" or host == "lain.bgm.tv" then
+        return true
+    end
+    return host:match("%.bgm%.tv$") ~= nil or host:match("%.bangumi%.tv$") ~= nil
+end
+
 -- opts: {root_dir, panel_color, cover_fill("yes"/"no"), mpv_path,
 --        overlay_id, res_x, res_y, on_redraw(fn)}
 function M.create(opts)
     opts = opts or {}
     local root_dir = opts.root_dir or ""
+    local bgm_proxy = opts.bgm_proxy or ""
+    local skip_cert = opts.bgm_proxy_skip_cert_verify == true
     local panel_hex = opts.panel_color or ass.C.panel
     local cover_fill = opts.cover_fill ~= "no"
     local mpv_path_opt = opts.mpv_path or "mpv"
@@ -153,7 +167,7 @@ function M.create(opts)
         local fi = ok and file_info(dst) or nil
         if fi and fi.size == M.BYTES then
             self.path, self.loading = dst, false
-            msg.info("封面已缓存: " .. dst)
+            -- msg.info("封面已缓存: " .. dst)
         else
             self.loading, self.failed = false, true
             msg.warn("封面处理失败: " .. tostring(dst))
@@ -164,18 +178,18 @@ function M.create(opts)
     function self.load(data)
         self.data = data
         local url = cover_url(data)
-        msg.error(url)
         if not url then return end
+        local use_proxy = bgm_proxy ~= "" and is_bangumi_image_url(url)
         local aid = anime_id_of(data)
 
-        if self.anime_id == aid then return end
+        -- 加载中(同一番剧)或已成功才短路; 换番/失败后允许重走
+        if self.loading and self.anime_id == aid then return end
+        if self.anime_id == aid and self.path and not self.failed then return end
+        if not aid then return end -- 可选加固: 拿不到番剧ID不发起下载
+
         self.anime_id, self.url = aid, url
         self.path, self.failed, self.loading = nil, false, true
 
-        if cache_dir == "" then
-            self.loading, self.failed = false, true
-            return
-        end
         paths.ensure_dir(mp_utils.join_path(root_dir, aid))
 
         local dst = root_path_for(aid)
@@ -202,11 +216,18 @@ function M.create(opts)
             resolve_mpv_path(mpv_path_opt), "--no-config", "--msg-level=all=no",
             "--really-quiet", "--no-terminal", "--frames=1", "--hwdec=no",
             "--no-sub", "--no-audio", "--ytdl=no", "--network-timeout=15",
-            "--vf=" .. vf, "--ovc=rawvideo", "--of=image2", "--ofopts=update=1",
-            "--o=" .. raw, "--", url,
         }
+        if use_proxy then
+            args[#args + 1] = "--http-proxy=" .. bgm_proxy
+        end
+        if skip_cert then args[#args + 1] = "--tls-verify=no" end
+        for _, v in ipairs({ "--vf=" .. vf, "--ovc=rawvideo", "--of=image2",
+                             "--ofopts=update=1", "--o=" .. raw, "--", url, }) do
+            args[#args + 1] = v
+        end
+
         mp.command_native_async({ name = "subprocess", playback_only = false,
-            capture_stdout = true, args = args }, function(ok, result)
+            capture_stdout = true, capture_stderr = true, args = args }, function(ok, result)
             if self.anime_id ~= aid then os.remove(raw) return end
             local status = (ok and result and result.status) or -1
             local fout = file_info(raw)
@@ -214,25 +235,50 @@ function M.create(opts)
                 finalize(raw, dst, aid)
                 return
             end
+            msg.warn(fmt("封面: mpv 解码失败(status=%s), 改用 ffmpeg 兜底: %s", tostring(status), url))
+
             -- mpv 失败 → ffmpeg 兜底
             local fvf = cover_fill
                 and fmt("scale=w=%d:h=%d:force_original_aspect_ratio=increase,crop=%d:%d", M.W, M.H, M.W, M.H)
                 or fmt("scale=w=%d:h=%d:force_original_aspect_ratio=decrease,"
                     .. "pad=w=%d:h=%d:x=-1:y=-1:color=0x%s", M.W, M.H, M.W, M.H, panel_hex)
-            local fargs = { "ffmpeg", "-y", "-loglevel", "error", "-i", url,
-                "-vf", fvf, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgra", raw }
+            local fargs = { "ffmpeg", "-y", "-loglevel", "error" }
+            -- ffmpeg 的 http 协议只支持 http 代理，不支持 socks；
+            -- socks 代理时交给 mpv 主路径，兜底路径不加代理参数避免报错。
+            if use_proxy and not bgm_proxy:match("^socks") then
+                fargs[#fargs + 1] = "-http_proxy"
+                fargs[#fargs + 1] = bgm_proxy
+            end
+            if skip_cert then
+                fargs[#fargs + 1] = "-tls_verify"
+                fargs[#fargs + 1] = "0"
+            end
+            for _, v in ipairs({ "-i", url, "-vf", fvf, "-frames:v", "1",
+                                 "-f", "rawvideo", "-pix_fmt", "bgra", raw }) do
+                fargs[#fargs + 1] = v
+            end
             mp.command_native_async({ name = "subprocess", playback_only = false,
-                capture_stdout = true, args = fargs }, function(ok2, res2)
+                capture_stdout = true, capture_stderr = true, args = fargs }, function(ok2, res2)
                 if self.anime_id ~= aid then os.remove(raw) return end
                 local st2 = (ok2 and res2 and res2.status) or -1
                 local f2 = file_info(raw)
                 if st2 == 0 and f2 and f2.size == M.W * M.H * 4 then
                     finalize(raw, dst, aid)
+                    msg.info("ffmpeg 兜底成功，封面下载解码完成")
                 else
                     os.remove(raw)
                     self.loading, self.failed = false, true
-                    msg.warn(fmt("封面下载失败 (mpv=%s, ffmpeg=%s): %s",
-                        tostring(status), tostring(st2), url))
+                    local function clip(s)
+                        s = tostring(s or ""):gsub("%s+", " ")
+                        return #s > 240 and s:sub(1, 240) .. "…" or s
+                    end
+                    msg.warn(fmt("封面下载失败: url=%s", url))
+                    msg.warn(fmt("  mpv    status=%s  stderr: %s",
+                        tostring(status), clip(result and result.stderr)))
+                    msg.warn(fmt("  ffmpeg status=%s  stderr: %s",
+                        tostring(st2), clip(res2 and res2.stderr)))
+                    msg.warn("  常见原因: TLS证书(子进程--no-config无CA, 可设 bgm_proxy_skip_cert_verify=yes) / "
+                              .. "代理不可用 / 系统PATH无mpv·ffmpeg / 图片403")
                     on_redraw()
                 end
             end)
