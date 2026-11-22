@@ -1,6 +1,7 @@
 local mp_utils = require "mp.utils"
 local paths = require "src.paths"
 local utils = require "src.utils"
+local json_store = require "src.core.json_store"
 
 local M = {}
 
@@ -126,22 +127,8 @@ local function load_db()
 end
 
 -- 保存数据库
-local function save_db(data)
-  local file = io.open(DB_PATH, "w")
-  if not file then
-    mp.msg.error("无法打开数据库文件: " .. DB_PATH)
-    return false
-  end
-  
-  local json = mp_utils.format_json(data)
-  if not json then
-    -- 简单的JSON序列化
-    json = "{}"
-  end
-  
-  file:write(json)
-  file:close()
-  return true
+local function save_db()
+    return json_store.write(DB_PATH, db_data)   -- 默认 atomic=true
 end
 
 -- 获取记录

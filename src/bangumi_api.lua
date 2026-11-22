@@ -2,6 +2,7 @@ local http = require "src.http"
 local mp_utils = require "mp.utils"
 local paths = require "src.paths"
 local config = require "src.config"
+local json_store = require "src.core.json_store"
 
 local M = {}
 
@@ -36,66 +37,60 @@ end
 -- 获取用户名（延迟初始化）
 local username = nil
 local function get_username()
-  if username then
-    return username
-  end
-  
-  local username_data = {}
-  
-  local info = mp_utils.file_info(USERNAME_FILE)
-  if info and info.is_file then
-    local file = io.open(USERNAME_FILE, "r")
-    if file then
-      local content = file:read("*all")
-      file:close()
-      username_data = mp_utils.parse_json(content) or {}
+    if username then return username end
+
+    local username_data = {}
+
+    local info = mp_utils.file_info(USERNAME_FILE)
+    if info and info.is_file then
+        local file = io.open(USERNAME_FILE, "r")
+        if file then
+            local content = file:read("*all")
+            file:close()
+            username_data = mp_utils.parse_json(content) or {}
+        end
     end
-  end
-  
-  local access_token = config.config.access_token
-  if not access_token then
-    mp.msg.error("BGM_ACCESS_TOKEN not found")
-    return nil
-  end
-  
-  if username_data[access_token] then
-    username = username_data[access_token]
-    return username
-  end
-  
-  -- 从API获取用户名
-  local res = M.get("/v0/me")
-  if not res or res.status_code ~= 200 then
-    mp.msg.error("Failed to get username from API")
-    return nil
-  end
-  
-  local fetched_username = res.body and res.body.username
-  if fetched_username then
-    username = fetched_username
-    username_data[access_token] = username
-    local file = io.open(USERNAME_FILE, "w")
-    if file then
-      file:write(mp_utils.format_json(username_data) or "{}")
-      file:close()
+
+    local access_token = config.config.access_token
+    if not access_token then
+        mp.msg.error("BGM_ACCESS_TOKEN not found")
+        return nil
     end
-    return username
-  end
-  
-  return nil
+
+    if username_data[access_token] then
+        username = username_data[access_token]
+        return username
+    end
+
+    -- 从API获取用户名
+    local res = M.get("/v0/me")
+    if not res or res.status_code ~= 200 then
+        mp.msg.error("Failed to get username from API")
+        return nil
+    end
+
+    local fetched_username = res.body and res.body.username
+    if fetched_username then
+        username = fetched_username
+        username_data[access_token] = username
+        json_store.write(USERNAME_FILE, username_data)  -- 原子写（tmp+rename）
+        return username
+    end
+
+    return nil
 end
 
 -- 获取默认headers
 local function get_headers()
-  return {
-    ["accept"] = "application/json",
-    ["User-Agent"] = "mpv_bangumi_sync/private",
-    ["Authorization"] = "Bearer " .. (config.config.access_token or ""),
-  }
+    return {
+        ["accept"] = "application/json",
+        ["User-Agent"] = "mpv_bangumi_sync/private",
+        ["Authorization"] = "Bearer " .. (config.config.access_token or ""),
+    }
 end
 
 local function get_proxy()
-  return config.config.bgm_proxy
+    return config.config.bgm_proxy
 end
 
 local function get_request_options(extra)
