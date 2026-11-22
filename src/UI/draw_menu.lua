@@ -394,14 +394,7 @@ end
 -- 兼容 json_store 不同解析函数命名
 local function json_decode(s)
     if type(s) ~= "string" or s == "" then return nil end
-    for _, f in ipairs({ "decode", "parse", "loads", "from_json" }) do
-        local fn = json_store[f]
-        if type(fn) == "function" then
-            local ok, res = pcall(fn, s)
-            if ok then return res end
-        end
-    end
-    return nil
+    return mp_utils.parse_json(s)
 end
 
 -- 收到数据后: 缓存 + 面板开着且同番剧则即时重绘

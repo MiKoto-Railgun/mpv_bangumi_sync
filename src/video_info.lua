@@ -75,46 +75,6 @@ local function get_current_resolution()
   return {width, height}
 end
 
-local function fetch_url_hash_range(url)
-  local result = mp.command_native({
-    name = "subprocess",
-    args = {
-      "curl",
-      "-L",
-      "-s",
-      "-S",
-      "--range",
-      HASH_RANGE,
-      "--max-filesize",
-      tostring(HASH_LIMIT),
-      "-w",
-      "\n" .. HTTP_CODE_MARKER .. "%{http_code}",
-      tostring(url),
-    },
-    playback_only = false,
-    capture_stdout = true,
-    capture_stderr = true,
-  })
-  if not result or result.status ~= 0 then
-    mp.msg.error("Failed to fetch URL range for hash: " .. tostring(result and result.stderr or ""))
-    return nil
-  end
-
-  local data, status_code_text = (result.stdout or ""):match("^(.*)\n" .. HTTP_CODE_MARKER .. "(%d%d%d)$")
-  local status_code = tonumber(status_code_text)
-  if status_code ~= 206 then
-    mp.msg.error("URL server does not support byte ranges for hash: HTTP " .. tostring(status_code or "unknown"))
-    return nil
-  end
-
-  data = data or ""
-  if #data > HASH_LIMIT then
-    mp.msg.error("Fetched URL hash range is too large: " .. tostring(#data))
-    return nil
-  end
-  return data
-end
-
 -- 计算文件MD5 hash（只读取前16MB）
 function M.get_hash(video_path)
   local hash_path = mp.command_native({"normalize-path", video_path}) or video_path
@@ -131,43 +91,6 @@ function M.get_hash(video_path)
   return hash
 end
 
-function M.get_hash_from_url(url)
-  local data = fetch_url_hash_range(url)
-  if not data then
-    return ""
-  end
-
-  local offset = 1
-  local hash = calculate_md5_from_chunks(function(read_size)
-    if offset > #data then
-      return nil
-    end
-    local chunk = data:sub(offset, offset + read_size - 1)
-    offset = offset + #chunk
-    return chunk
-  end)
-  return hash
-end
-
-function M.get_url_content_length(url)
-  local result = mp.command_native({
-    name = "subprocess",
-    args = {"curl", "-L", "-s", "-S", "-I", tostring(url)},
-    playback_only = false,
-    capture_stdout = true,
-    capture_stderr = true,
-  })
-  if not result or result.status ~= 0 or not result.stdout then
-    return 0
-  end
-
-  local size = nil
-  for value in result.stdout:gmatch("[Cc][Oo][Nn][Tt][Ee][Nn][Tt]%-[Ll][Ee][Nn][Gg][Tt][Hh]:%s*(%d+)") do
-    size = tonumber(value) or size
-  end
-  return size or 0
-end
-
 function M.build_info(fields)
   fields = fields or {}
   return {
@@ -177,6 +100,82 @@ function M.build_info(fields)
     size = tonumber(fields.size) or 0,
     resolution = fields.resolution or {0, 0},
   }
+end
+
+-- 异步拉取 URL hash range：callback(data)，失败 nil
+local function fetch_url_hash_range_async(url, callback)
+    mp.command_native_async({
+        name = "subprocess",
+        args = { "curl", "-L", "-s", "-S", "--range", HASH_RANGE,
+            "--max-filesize", tostring(HASH_LIMIT),
+            "-w", "\n" .. HTTP_CODE_MARKER .. "%{http_code}", tostring(url) },
+        playback_only = false,
+        capture_stdout = true,
+        capture_stderr = true,
+    }, function(result)
+        if not result or result.status ~= 0 then
+            mp.msg.error("Failed to fetch URL range for hash: " .. tostring(result and result.stderr or ""))
+            callback(nil) return
+        end
+        local data, status_code_text = (result.stdout or ""):match("^(.*)\n" .. HTTP_CODE_MARKER .. "(%d%d%d)$")
+        if tonumber(status_code_text) ~= 206 then
+            mp.msg.error("URL server does not support byte ranges for hash: HTTP " .. tostring(status_code_text or "unknown"))
+            callback(nil) return
+        end
+        data = data or ""
+        if #data > HASH_LIMIT then
+            mp.msg.error("Fetched URL hash range is too large: " .. tostring(#data))
+            callback(nil) return
+        end
+        callback(data)
+    end)
+end
+
+-- 计算远端 URL 文件 hash（异步）：callback(hash)
+function M.get_hash_from_url(url, callback)
+    fetch_url_hash_range_async(url, function(data)
+        if not data then callback("") return end
+        local offset = 1
+        callback(calculate_md5_from_chunks(function(read_size)
+            if offset > #data then return nil end
+            local chunk = data:sub(offset, offset + read_size - 1)
+            offset = offset + #chunk
+            return chunk
+        end))
+    end)
+end
+
+-- 异步获取 Content-Length：callback(size)
+local function get_url_content_length_async(url, callback)
+    mp.command_native_async({
+        name = "subprocess",
+        args = {"curl", "-L", "-s", "-S", "-I", tostring(url)},
+        playback_only = false,
+        capture_stdout = true,
+        capture_stderr = true,
+    }, function(result)
+        if not result or result.status ~= 0 or not result.stdout then callback(0) return end
+        local size = nil
+        for value in result.stdout:gmatch("[Cc][Oo][Nn][Tt][Ee][Nn][Tt]%-[Ll][Ee][Nn][Gg][Tt][Hh]:%s*(%d+)") do
+            size = tonumber(value) or size
+        end
+        callback(size or 0)
+    end)
+end
+
+-- 异步获取远端视频信息：callback(info)
+function M.get_url_info_async(url, callback)
+    M.get_hash_from_url(url, function(hash)
+        get_url_content_length_async(url, function(size)
+            callback(M.build_info({
+                hash = hash,
+                duration = mp.get_property_number("duration") or 0,
+                filename = get_url_filename(url),
+                size = size,
+                resolution = get_current_resolution(),
+            }))
+        end)
+    end)
 end
 
 -- 获取视频信息
@@ -212,17 +211,6 @@ function M.get_info(video_path)
     filename = filename,
     size = file_info.size,
     resolution = {width or 0, height or 0},
-  })
-end
-
-function M.get_url_info(url)
-  local filename = get_url_filename(url)
-  return M.build_info({
-    hash = M.get_hash_from_url(url),
-    duration = mp.get_property_number("duration") or 0,
-    filename = filename,
-    size = M.get_url_content_length(url),
-    resolution = get_current_resolution(),
   })
 end
 

@@ -157,115 +157,121 @@ function M.open_episode_status_menu(state)
 end
 
 local function build_info_menu_props(state)
-  local CurrentEpisodeInfo = state.CurrentEpisodeInfo
-  local title = non_empty(CurrentEpisodeInfo and CurrentEpisodeInfo.animeTitle)
-    or non_empty(title_guess.get_default_search_query())
-    or "未获取"
-  if state.NotInStorage then
+    local CurrentEpisodeInfo = state.CurrentEpisodeInfo
+    local title = non_empty(CurrentEpisodeInfo and CurrentEpisodeInfo.animeTitle)
+                    or non_empty(title_guess.get_default_search_query()) or "未获取"
+    if state.NotInStorage then
+        return {
+          type = "menu_bgm_info",
+          title = title,
+          search_style = "disabled",
+          items = { M.format_menu_item("视频不在工作目录") },
+        }
+    end
+    local EpisodeStatusText = state.EpisodeStatusText or "未获取"
+    local EpisodeProgressText = state.EpisodeProgressText or "未获取"
+    local IsNetworkPath = state.IsNetworkPath == true
+    local NetworkModeText = state.NetworkModeText or ""
+    local NetworkModeIcon = "sync_alt"
+    local AutoMarkText = state.AutoMarkText or "开启"
+    local AutoMarkIcon = (AutoMarkText == "开启") and "toggle_on" or "toggle_off"
+    local episode_title = non_empty(CurrentEpisodeInfo and CurrentEpisodeInfo.episodeTitle) or "未获取"
+    local episode_ep = CurrentEpisodeInfo and CurrentEpisodeInfo.episodeEp
+    if type(episode_ep) == "number" and episode_ep > 0 then
+        episode_title = string.format("第%s话  %s", tostring(episode_ep), episode_title)
+    end
+    -- 进度同步进行中：状态行切换为"更新中"占位（旋转图标、不可点击）
+    local EpisodeUpdating = state.EpisodeUpdating == true
+    local status_title, status_italic, status_muted, status_icon, status_actions
+    if EpisodeUpdating then
+        status_title, status_italic, status_muted = "状态：更新中", true, false
+        status_icon, status_actions = "spinner", nil
+    else
+        status_title = "状态：" .. EpisodeStatusText
+        status_italic, status_muted = false, false
+        if EpisodeStatusText == "已看" then
+            status_title = "状态：已看 ✔"
+        elseif EpisodeStatusText == "未看" then
+            status_italic = true
+            status_muted = true
+        end
+        status_actions = { { name = "edit_status", icon = "edit", label = "修改当前集状态" } }
+    end
+    local items = {
+        {
+            title = episode_title,
+            hint  = "播放中",
+            value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
+            keep_open = true },
+        {
+            title = status_title, italic = status_italic, muted = status_muted,
+            icon = status_icon,
+            value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
+            keep_open = true,
+            selectable = EpisodeUpdating and false or nil,  -- 更新中不可点击
+            actions = status_actions, actions_place = "inside" },
+        {
+            title = "进 度  " .. EpisodeProgressText,
+            hint = "查看单集 ›",
+            value = { "script-message-to", mp.get_script_name(), "bgm-open-episode-list" },
+            selectable = true,
+            keep_open = true },
+        {
+            title = "手动匹配",
+            value = { "script-message-to", mp.get_script_name(), "bgm-open-search-from-info" },
+            selectable = true,
+            keep_open = false,
+            actions = {
+            { name = "refresh", icon = "refresh", label = "根据当前匹配的番剧Id，重新获取单集信息" },
+            },
+            actions_place = "inside"
+        },
+    }
+    -- 【修改】以下三项仅在已匹配到番剧时插入
+    local is_matched = type(CurrentEpisodeInfo) == "table" and CurrentEpisodeInfo.episodeId ~= nil
+    if is_matched then
+        items[#items + 1] = {
+            title = "自动点格子：" .. AutoMarkText, selectable = true, keep_open = true,
+            value = { "script-message-to", mp.get_script_name(), "bgm-toggle-auto-mark" },
+            actions = { { name = "toggle_auto_mark", icon = AutoMarkIcon, label = "切换自动点格子" }, },
+            actions_place = "inside",
+        }
+        items[#items + 1] = {
+            title = "番剧信息", selectable = true,
+            value = { "script-message-to", mp.get_script_name(), "bgm-info-panel", "toggle" },
+        }
+        items[#items + 1] = {
+            title = "打开Bangumi", selectable = true,
+            value = { "script-message", "open-bangumi-url" },
+        }
+    end
+    if EpisodeListMenu then
+        -- 保留进度栏的位置与文字，由 uosc 在右侧展开子菜单。
+        EpisodeListMenu.title = items[3].title
+        items[3] = EpisodeListMenu
+    end
+    if IsNetworkPath then
+        table.insert(items, #items, {
+            title = "匹配模式：" .. (NetworkModeText ~= "" and NetworkModeText or "未知"),
+            value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
+            selectable = true,
+            keep_open = true,
+            actions = {
+                { name = "toggle_network_mode", icon = NetworkModeIcon, label = "切换匹配模式" },
+            },
+            actions_place = "inside",
+        })
+    end
     return {
-      type = "menu_bgm_info",
-      title = title,
-      search_style = "disabled",
-      items = { M.format_menu_item("视频不在工作目录") },
+        type = "menu_bgm_info",
+        title = title,
+        search_style = "disabled",
+        callback = { mp.get_script_name(), "bgm-info-menu-event" },
+        on_close = EpisodeListRequest and {
+            "script-message-to", mp.get_script_name(), "bgm-cancel-episode-list", tostring(EpisodeListRequest),
+        } or nil,
+        items = items,
     }
-  end
-  local EpisodeStatusText = state.EpisodeStatusText or "未获取"
-  local EpisodeProgressText = state.EpisodeProgressText or "未获取"
-  local IsNetworkPath = state.IsNetworkPath == true
-  local NetworkModeText = state.NetworkModeText or ""
-  local NetworkModeIcon = "sync_alt"
-  local AutoMarkText = state.AutoMarkText or "开启"
-  local AutoMarkIcon = (AutoMarkText == "开启") and "toggle_on" or "toggle_off"
-  local episode_title = non_empty(CurrentEpisodeInfo and CurrentEpisodeInfo.episodeTitle) or "未获取"
-  local episode_ep = CurrentEpisodeInfo and CurrentEpisodeInfo.episodeEp
-  if type(episode_ep) == "number" and episode_ep > 0 then
-    episode_title = string.format("第%s话  %s", tostring(episode_ep), episode_title)
-  end
-  local status_title = "状态：" .. EpisodeStatusText
-  local status_italic = false
-  local status_muted = false
-  if EpisodeStatusText == "已看" then
-    status_title = "状态：已看 ✔"
-  elseif EpisodeStatusText == "未看" then
-    status_italic = true
-    status_muted = true
-  end
-  local items = {
-    {
-      title = episode_title,
-      hint  = "播放中",
-      value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
-      keep_open = true },
-    {
-      title = status_title,
-      italic = status_italic, muted = status_muted,
-      value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
-      keep_open = true,
-      actions = {
-        { name = "edit_status", icon = "edit", label = "修改当前集状态" },
-      },
-      actions_place = "inside" },
-    {
-      title = "进 度  " .. EpisodeProgressText,
-      hint = "查看单集 ›",
-      value = { "script-message-to", mp.get_script_name(), "bgm-open-episode-list" },
-      selectable = true,
-      keep_open = true },
-    {
-      title = "手动匹配",
-      value = { "script-message-to", mp.get_script_name(), "bgm-open-search-from-info" },
-      selectable = true,
-      keep_open = false,
-      actions = {
-        { name = "refresh", icon = "refresh", label = "根据当前匹配的番剧Id，重新获取单集信息" },
-      },
-      actions_place = "inside" },
-  }
-  -- 【修改】以下三项仅在已匹配到番剧时插入
-  local is_matched = type(CurrentEpisodeInfo) == "table" and CurrentEpisodeInfo.episodeId ~= nil
-  if is_matched then
-    items[#items + 1] = {
-      title = "自动点格子：" .. AutoMarkText, selectable = true, keep_open = true,
-      value = { "script-message-to", mp.get_script_name(), "bgm-toggle-auto-mark" },
-      actions = { { name = "toggle_auto_mark", icon = AutoMarkIcon, label = "切换自动点格子" }, },
-      actions_place = "inside",
-    }
-    items[#items + 1] = {
-      title = "番剧信息", selectable = true,
-      value = { "script-message-to", mp.get_script_name(), "bgm-info-panel", "toggle" },
-    }
-    items[#items + 1] = {
-      title = "打开Bangumi", selectable = true,
-      value = { "script-message", "open-bangumi-url" },
-    }
-end
-  if EpisodeListMenu then
-    -- 保留进度栏的位置与文字，由 uosc 在右侧展开子菜单。
-    EpisodeListMenu.title = items[3].title
-    items[3] = EpisodeListMenu
-  end
-  if IsNetworkPath then
-    table.insert(items, #items, {
-      title = "匹配模式：" .. (NetworkModeText ~= "" and NetworkModeText or "未知"),
-      value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
-      selectable = true,
-      keep_open = true,
-      actions = {
-        { name = "toggle_network_mode", icon = NetworkModeIcon, label = "切换匹配模式" },
-      },
-      actions_place = "inside",
-    })
-  end
-  return {
-    type = "menu_bgm_info",
-    title = title,
-    search_style = "disabled",
-    callback = { mp.get_script_name(), "bgm-info-menu-event" },
-    on_close = EpisodeListRequest and {
-      "script-message-to", mp.get_script_name(), "bgm-cancel-episode-list", tostring(EpisodeListRequest),
-    } or nil,
-    items = items,
-  }
 end
 
 function M.show_episode_list(state, episodes_data, message, update, preserve_selection)

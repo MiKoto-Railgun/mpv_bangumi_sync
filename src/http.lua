@@ -2,6 +2,9 @@ local mp_utils = require "mp.utils"
 
 local M = {}
 
+-- 请求默认超时（秒）兜底
+local DEFAULT_HTTP_TIMEOUT = 30
+
 -- 使用curl进行HTTP请求
 -- @param url string 请求URL
 -- @param options table 请求选项 {method, headers, params, data, proxy}

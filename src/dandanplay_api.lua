@@ -97,91 +97,90 @@ local function generate_signature(timestamp, path)
   return hex_to_base64(hash_hex)
 end
 
--- POST请求
-function M.post(uri, data, timestamp)
-  timestamp = timestamp or os.time()
-  local path = "/api/v2/" .. uri
-  local sig = generate_signature(timestamp, path)
-  
-  local headers = {
-    ["Accept"] = "application/json",
-    ["X-AppId"] = decode_hex(appid_enc, SEED),
-    ["X-signature"] = sig,
-    ["X-Timestamp"] = tostring(timestamp),
-  }
-  
-  local url = BASE_API .. uri
-  return http.post(url, {
-    headers = headers,
-    data = data,
-  })
+-- POST请求（异步）：callback(res)，返回 mpv 请求句柄
+function M.post(uri, data, timestamp, callback)
+    timestamp = timestamp or os.time()
+    local path = "/api/v2/" .. uri
+    local sig = generate_signature(timestamp, path)
+    local headers = {
+        ["Accept"] = "application/json",
+        ["X-AppId"] = decode_hex(appid_enc, SEED),
+        ["X-signature"] = sig,
+        ["X-Timestamp"] = tostring(timestamp),
+    }
+    local url = BASE_API .. uri
+    return http.post(url, {
+        headers = headers,
+        data = data,
+        timeout = 30,
+        callback = function(res) if callback then callback(res) end end,
+    })
 end
 
--- GET请求
-function M.get(uri, params)
-  local timestamp = os.time()
-  local path = "/api/v2/" .. uri
-  local sig = generate_signature(timestamp, path)
-  
-  local headers = {
-    ["Accept"] = "application/json",
-    ["X-AppId"] = decode_hex(appid_enc, SEED),
-    ["X-signature"] = sig,
-    ["X-Timestamp"] = tostring(timestamp),
-  }
-  
-  local url = BASE_API .. uri
-  return http.get(url, {
-    headers = headers,
-    params = params,
-  })
+-- GET请求（异步）：callback(res)
+function M.get(uri, params, callback)
+    local timestamp = os.time()
+    local path = "/api/v2/" .. uri
+    local sig = generate_signature(timestamp, path)
+    local headers = {
+        ["Accept"] = "application/json",
+        ["X-AppId"] = decode_hex(appid_enc, SEED),
+        ["X-signature"] = sig,
+        ["X-Timestamp"] = tostring(timestamp),
+    }
+    local url = BASE_API .. uri
+    return http.get(url, {
+        headers = headers,
+        params = params,
+        timeout = 30,
+        callback = function(res) if callback then callback(res) end end,
+    })
 end
 
--- 匹配视频
-function M.match(video_info)
-  local data = {
-    fileName = video_info.filename,
-    fileHash = video_info.hash,
-    fileSize = video_info.size,
-    videoDuration = video_info.duration,
-    matchMode = "hashAndFileName",
-  }
-  
-  mp.msg.verbose("Match info: " .. video_info.filename .. " " .. video_info.hash) 
-  local res = M.post("match", data)
-  
-  if not res or not res.body or not res.body.success then
-    mp.msg.verbose("Match failed or no success flag")
-    return {}
-  end
-  
-  return res.body.matches or {}
+-- 匹配视频：callback(matches)，失败返回空表（契约与原同步版一致）
+function M.match(video_info, callback)
+    local data = {
+        fileName = video_info.filename,
+        fileHash = video_info.hash,
+        fileSize = video_info.size,
+        videoDuration = video_info.duration,
+        matchMode = "hashAndFileName",
+    }
+    mp.msg.verbose("Match info: " .. video_info.filename .. " " .. video_info.hash)
+    M.post("match", data, nil, function(res)
+        if not res or not res.body or not res.body.success then
+            mp.msg.verbose("Match failed or no success flag")
+            callback({})
+            return
+        end
+        callback(res.body.matches or {})
+    end)
 end
 
--- 获取anime信息
-function M.get_anime_info(anime_id)
-  local res = M.get("bangumi/" .. tostring(anime_id))
-  if not res or not res.body or not res.body.success then
-    mp.msg.error("Failed to get anime info: " .. (res.body and res.body.errorMessage or "unknown"))
-    return nil
-  end
-
-  return res.body.bangumi
+-- 获取anime信息：callback(bangumi 或 nil)
+function M.get_anime_info(anime_id, callback)
+    M.get("bangumi/" .. tostring(anime_id), nil, function(res)
+        if not res or not res.body or not res.body.success then
+            -- 修复：原代码 res.body 在 res 为 nil 时索引崩溃
+            mp.msg.error("Failed to get anime info: "
+                .. tostring(res and res.body and res.body.errorMessage
+                    or (res and res.status_code) or "unknown"))
+            callback(nil)
+            return
+        end
+        callback(res.body.bangumi)
+    end)
 end
 
--- 搜索anime
-function M.search_anime(keyword, type_)
-  local params = {keyword = keyword}
-  if type_ then
-    params.type = type_
-  end
-  
-  local res = M.get("search/anime", params)
-  if not res or not res.body then
-    return {}
-  end
-  
-  return res.body.animes or {}
+-- 搜索anime：callback(animes, res)，animes 失败为空表，res 供上层判断 HTTP 状态
+function M.search_anime(keyword, type_, callback)
+    if type(type_) == "function" then callback = type_; type_ = nil end
+    local params = {keyword = keyword}
+    if type_ then params.type = type_ end
+    M.get("search/anime", params, function(res)
+        if not res or not res.body then callback({}, res) return end
+        callback(res.body.animes or {}, res)
+    end)
 end
 
 return M
