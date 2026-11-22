@@ -135,23 +135,33 @@ local function clamp_batch_threshold(value, default_value)
   return num
 end
 
+-- 归一化单个 storage：统一斜杠、去尾部已有分隔符后补恰好一个，形成路径边界
+local function normalize_storage_entry(entry)
+    if not entry or entry == "" then return nil end
+    entry = entry:gsub("\\", "/")
+    entry = entry:gsub("/+$", "")
+    if entry == "" then return nil end
+    return entry .. "/"
+end
+
 -- 解析存储目录（支持多个目录）
 local function parse_storages(storages_str)
-  if not storages_str or storages_str == "" then
-    return {}
-  end
-  
-  local storages = {}
-  local separator = mp.get_property_native("platform") == "windows" and ";" or ":"
-  
-  for storage in storages_str:gmatch("[^" .. separator .. "]+") do
-    storage = storage:match("^%s*(.-)%s*$") -- trim
-    if storage ~= "" then
-      table.insert(storages, storage)
+    if not storages_str or storages_str == "" then
+        return {}
     end
-  end
-  
-  return storages
+
+    local storages = {}
+    local separator = mp.get_property_native("platform") == "windows" and ";" or ":"
+
+    for storage in storages_str:gmatch("[^" .. separator .. "]+") do
+        storage = storage:match("^%s*(.-)%s*$") -- trim
+        local normalized = normalize_storage_entry(storage)
+        if normalized then
+            table.insert(storages, normalized)
+        end
+    end
+
+    return storages
 end
 
 local function parse_comma_list(value)
