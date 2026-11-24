@@ -25,60 +25,85 @@ local function get_subject_eps(subject)
   return nil
 end
 
-local function maybe_complete_subject(subject_id, synced_ids, collection_status, subject_eps, callback)
+-- 全部正片已看（进度满，如 12/12）后自动将番剧标为"看过"。
+-- 与本次同步的是哪一集无关；防重提交依赖 collection 状态守卫。
+local function maybe_complete_subject(subject_id, collection_status, subject_eps, callback)
     local done = function(ok) callback(ok == true) end
-    if not is_auto_complete_enabled() then done(false) return end
-
+    if not is_auto_complete_enabled() then
+        done(false)
+        return
+    end
+    local eps_count  -- ← 先声明，修复 with_eps 闭包引用全局的作用域 bug
     local function with_collection(cs, seps)
-        if tonumber(cs) == 2 then done(false) return end
+        if tonumber(cs) == 2 then
+            done(false)
+            return
+        end
         local function with_eps(total_eps)
-            if total_eps ~= nil and total_eps ~= eps_count then done(false) return end
+            -- 目录总话数与正片列表不一致（连载中、列表未收录全部话数）时放弃，防止提前完结
+            if total_eps ~= nil and total_eps ~= eps_count then
+                done(false)
+                return
+            end
             bangumi_api.update_user_collection_status(subject_id, 2, function(updated)
                 if not response_succeeded(updated) then
                     mp.msg.warn("单集已同步，但番剧自动标记看过失败: " .. tostring(subject_id))
-                    done(false) return
+                    done(false)
+                    return
                 end
                 mp.msg.info("番剧全部正片已看，条目状态更新为看过: " .. tostring(subject_id))
                 done(true)
             end)
         end
-        if seps ~= nil then with_eps(seps) return end
+        if seps ~= nil then
+            with_eps(seps)
+            return
+        end
         bangumi_api.get_subject(subject_id, function(subject)
-            if not response_succeeded(subject) then done(false) return end
+            if not response_succeeded(subject) then
+                done(false)
+                return
+            end
             with_eps(get_subject_eps(subject.body))
         end)
     end
-
-    local eps_count
     local function check_eps(res)
         local body = res and res.body
         if not response_succeeded(res) or type(body) ~= "table" or type(body.data) ~= "table" then
             mp.msg.warn("无法检查番剧是否全部看过: " .. tostring(subject_id))
-            done(false) return
+            done(false)
+            return
         end
         local episodes = body.data
-        if #episodes == 0 or tonumber(body.total) ~= #episodes then done(false) return end
-        local last_episode, last_sort, seen, all_watched = nil, -math.huge, {}, true
+        if #episodes == 0 or tonumber(body.total) ~= #episodes then
+            done(false)
+            return
+        end
+        local seen, all_watched = {}, true
         for _, item in ipairs(episodes) do
             local episode = item.episode
             local id = episode and tonumber(episode.id)
             local sort = episode and tonumber(episode.sort)
             if tonumber(item.type) ~= 2 or not id or seen[id] or not sort or tonumber(episode.type) ~= 0 then
-                all_watched = false break
+                all_watched = false
+                break
             end
             seen[id] = true
-            if sort > last_sort then last_episode, last_sort = id, sort end
         end
-        if not all_watched then done(false) return end
-        local includes_last = false
-        for _, id in ipairs(synced_ids) do
-            if tonumber(id) == last_episode then includes_last = true end
+        if not all_watched then
+            done(false)
+            return
         end
-        if not includes_last then done(false) return end
         eps_count = #episodes
-        if collection_status ~= nil then with_collection(collection_status, subject_eps) return end
+        if collection_status ~= nil then
+            with_collection(collection_status, subject_eps)
+            return
+        end
         bangumi_api.get_user_collection(subject_id, function(collection)
-            if not response_succeeded(collection) or type(collection.body) ~= "table" then done(false) return end
+            if not response_succeeded(collection) or type(collection.body) ~= "table" then
+                done(false)
+                return
+            end
             with_collection(tonumber(collection.body.type), get_subject_eps(collection.body.subject))
         end)
     end
@@ -232,7 +257,7 @@ function M.flush_pending(opts, callback)
                     if tonumber(opts.subject_id) == tonumber(job.subject_id) then
                         cs, seps = opts.collection_status, opts.subject_eps
                     end
-                    maybe_complete_subject(job.subject_id, job.ids, cs, seps, on_done)
+                    maybe_complete_subject(job.subject_id, cs, seps, on_done)
                 else
                     on_done(false)
                 end
@@ -360,7 +385,7 @@ M.update_episode = function(opts, callback)
                     mp.msg.error("更新剧集状态失败: " .. tostring(episode_id))
                     done(utils.subprocess_err()) return
                 end
-                maybe_complete_subject(subject_id, {episode_id},
+                maybe_complete_subject(subject_id,
                     collection_resp.collection_status, collection_resp.subject_eps, function(completed)
                         after_queue({ queued = false, queued_count = 0,
                             threshold = get_storage_threshold(storage_config),
