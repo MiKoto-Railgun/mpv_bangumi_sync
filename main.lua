@@ -40,6 +40,7 @@ CurrentEpisodeWatched = false
 CurrentNetworkMode = nil
 NetworkModeOverride = nil
 NetworkModeText = ""
+MatchInProgress = false
 local flush_pending_updates
 local compose_sync_message
 local update_episode_status_from_cache
@@ -430,6 +431,8 @@ local function init(episode_id, opts)
     end
     CurrentNetworkMode = network_mode
     update_network_mode_text()
+    MatchInProgress = true
+    update_info_menu_view() -- 菜单已开则立即切换为加载中视图
     local stream_mode = network_mode == "stream"
     local network_file_mode = network_mode == "file"
     local context_service = stream_mode and stream_context or sync_context
@@ -441,6 +444,8 @@ local function init(episode_id, opts)
         remote_url = network_file_mode and current_path or nil,
         remote_path_key = network_file_mode and utils.stable_url_key(current_path) or nil,
     }, function(result)
+        MatchInProgress = false
+        update_info_menu_view() -- 匹配结束（成功/失败/select 分支均覆盖），刷新为最终状态
         if result and result.status == "select_subject" then
             local query = result.query or title_guess.get_default_search_query()
             mp.msg.info("流媒体未绑定Bangumi条目: " .. tostring(query or ""))
@@ -624,6 +629,7 @@ local function update_info_menu_view()
         IsNetworkPath = is_current_stream(),
         NetworkModeText = NetworkModeText,
         EpisodeUpdating = ProgressUpdating,
+        MatchInProgress = MatchInProgress,
     })
 end
 
@@ -639,6 +645,7 @@ local function get_info_menu_state()
         IsNetworkPath = is_current_stream(),
         NetworkModeText = NetworkModeText,
         EpisodeUpdating = ProgressUpdating,
+        MatchInProgress = MatchInProgress,
     }
 end
 
@@ -807,100 +814,97 @@ end)
 apply_auto_mark_mode({force_log = true})
 
 mp.register_event("file-loaded", function()
-  PendingBgmEpisodes = nil
-  NetworkModeOverride = nil
-  apply_auto_mark_mode()
-  local path = mp.get_property "path"
-  local network_mode = resolve_network_mode(path)
-  if network_mode then
-    if network_mode == "stream" and not Options.enable_stream_match then
-      mp.msg.verbose("stream match disabled, skip network playback: ", path)
-      return
+    PendingBgmEpisodes = nil
+    NetworkModeOverride = nil
+    apply_auto_mark_mode()
+    local path = mp.get_property "path"
+    local network_mode = resolve_network_mode(path)
+    if network_mode then
+        if network_mode == "stream" and not Options.enable_stream_match then
+            mp.msg.verbose("stream match disabled, skip network playback: ", path)
+            return
+        end
+        mp.msg.verbose("Initializing network playback:", path, "mode:", network_mode)
+        init(nil, { network_mode = network_mode })
+        return
     end
-    mp.msg.verbose("Initializing network playback:", path, "mode:", network_mode)
-    init(nil, { network_mode = network_mode })
-    return
-  end
-  init()
+    init()
 end)
 
 
 mp.register_event("end-file", function(event)
-  cancel_episode_list()
-  ui_menu.clear_episode_list()
-  mp.commandv("script-message-to", "uosc", "close-menu", "menu_bgm_info")
-  if not event then
-    return
-  end
-  if event.reason == "quit" then
-    flush_pending_updates(event.reason, {detach = true})
-  end
+    cancel_episode_list()
+    ui_menu.clear_episode_list()
+    mp.commandv("script-message-to", "uosc", "close-menu", "menu_bgm_info")
+    MatchInProgress = false
+    if not event then
+        return
+    end
+    if event.reason == "quit" then
+        flush_pending_updates(event.reason, {detach = true})
+    end
 end)
 
 mp.register_event("shutdown", function()
-  cancel_episode_list()
-  flush_pending_updates("shutdown", {detach = true})
+    cancel_episode_list()
+    flush_pending_updates("shutdown", {detach = true})
 end)
 
 -- key bindings
-
 local key_bindings = {
-  ["Alt+o"] = { "open-bangumi-info" },
+    ["Alt+o"] = { "open-bangumi-info" },
 }
-
 for key, binding in pairs(key_bindings) do
-  table.insert(binding, 1, "script-message")
-  local desc = table.concat(binding, "", 2)
-  mp.msg.verbose("key:", key, "binding:", binding[2], "desc:", desc)
-  mp.add_key_binding(key, desc, function()
-    mp.command_native(binding)
-  end)
+    table.insert(binding, 1, "script-message")
+    local desc = table.concat(binding, "", 2)
+    mp.msg.verbose("key:", key, "binding:", binding[2], "desc:", desc)
+    mp.add_key_binding(key, desc, function() mp.command_native(binding) end)
 end
 
--- script messages
 
+-- script messages
 mp.register_script_message("open-bangumi-url", function()
-  if not AnimeInfo or not AnimeInfo.bgm_url then
-    mp.msg.error "未匹配到番剧信息"
-    return
-  end
-  bangumi_service.open_url(AnimeInfo.bgm_url).execute()
+    if not AnimeInfo or not AnimeInfo.bgm_url then
+        mp.msg.error "未匹配到番剧信息"
+        return
+    end
+    bangumi_service.open_url(AnimeInfo.bgm_url).execute()
 end)
 
 mp.register_script_message("open-bangumi-info", function()
-  ui_menu.open_info_menu(get_info_menu_state())
+    ui_menu.open_info_menu(get_info_menu_state())
 end)
 
 mp.register_script_message("bgm-toggle-auto-mark", function()
-  toggle_auto_mark_from_panel()
+    toggle_auto_mark_from_panel()
 end)
 
 mp.register_script_message("bgm-toggle-network-mode", function()
-  toggle_network_mode_from_panel()
+    toggle_network_mode_from_panel()
 end)
 
 mp.register_script_message("bgm-noop", function() end)
 
 local function valid_episode_cache(data)
-  return type(data) == "table" and type(data.data) == "table"
+    return type(data) == "table" and type(data.data) == "table"
 end
 
 local function get_episode_list_cached(context)
-  if valid_episode_cache(context.episodes_data) then
-    return context.episodes_data
-  end
-  if not context.episodes_path and context.runtime_episode_id then
-    context.episodes_path = db.get_path(context.runtime_episode_id,
-      context.episode_info and context.episode_info.manualEpisode and "episodes_all" or "episodes")
-  end
-  if context.episodes_path then
-    -- 列表展示复用匹配缓存；过期检查与主动刷新仍由匹配流程负责。
-    local cached = json_store.read(context.episodes_path, {validate = valid_episode_cache})
-    if cached then
-      context.episodes_data = cached
-      return cached
+    if valid_episode_cache(context.episodes_data) then
+        return context.episodes_data
     end
-  end
+    if not context.episodes_path and context.runtime_episode_id then
+        context.episodes_path = db.get_path(context.runtime_episode_id,
+            context.episode_info and context.episode_info.manualEpisode and "episodes_all" or "episodes")
+    end
+    if context.episodes_path then
+        -- 列表展示复用匹配缓存；过期检查与主动刷新仍由匹配流程负责。
+        local cached = json_store.read(context.episodes_path, {validate = valid_episode_cache})
+        if cached then
+            context.episodes_data = cached
+            return cached
+        end
+    end
 end
 
 function broadcast_watch_status(context, episodes)

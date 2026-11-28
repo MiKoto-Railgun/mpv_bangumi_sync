@@ -168,11 +168,47 @@ local function build_info_menu_props(state)
           items = { M.format_menu_item("视频不在工作目录") },
         }
     end
-    local EpisodeStatusText = state.EpisodeStatusText or "未获取"
-    local EpisodeProgressText = state.EpisodeProgressText or "未获取"
     local IsNetworkPath = state.IsNetworkPath == true
     local NetworkModeText = state.NetworkModeText or ""
     local NetworkModeIcon = "sync_alt"
+    if state.MatchInProgress == true then
+        local items = {
+            {
+                title = "加载中...",
+                icon = "spinner",
+                italic = true,
+                muted = true,
+                value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
+                keep_open = true,
+                selectable = false,
+            },
+        }
+        if IsNetworkPath then
+            items[#items + 1] = {
+                title = "匹配模式：" .. (NetworkModeText ~= "" and NetworkModeText or "未知"),
+                value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
+                selectable = true,
+                keep_open = true,
+                actions = { { name = "toggle_network_mode", icon = NetworkModeIcon, label = "切换匹配模式" } },
+                actions_place = "inside",
+            }
+        end
+        items[#items + 1] = {
+            title = "手动匹配",
+            value = { "script-message-to", mp.get_script_name(), "bgm-open-search-from-info" },
+            selectable = true,
+            keep_open = false,
+        }
+        return {
+            type = "menu_bgm_info",
+            title = title,
+            search_style = "disabled",
+            callback = { mp.get_script_name(), "bgm-info-menu-event" },
+            items = items,
+        }
+    end
+    local EpisodeStatusText = state.EpisodeStatusText or "未获取"
+    local EpisodeProgressText = state.EpisodeProgressText or "未获取"
     local AutoMarkText = state.AutoMarkText or "开启"
     local AutoMarkIcon = (AutoMarkText == "开启") and "toggle_on" or "toggle_off"
     local episode_title = non_empty(CurrentEpisodeInfo and CurrentEpisodeInfo.episodeTitle) or "未获取"
@@ -199,68 +235,61 @@ local function build_info_menu_props(state)
     end
     local items = {
         {
-            title = episode_title,
-            hint  = "播放中",
+            title = episode_title, hint = "播放中",
             value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
             keep_open = true },
         {
-            title = status_title, italic = status_italic, muted = status_muted,
-            icon = status_icon,
+            title = status_title, italic = status_italic,
+            muted = status_muted, icon = status_icon,
             value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
-            keep_open = true,
-            selectable = EpisodeUpdating and false or nil,  -- 更新中不可点击
+            keep_open = true, selectable = EpisodeUpdating and false or nil,
             actions = status_actions, actions_place = "inside" },
         {
-            title = "进 度  " .. EpisodeProgressText,
-            hint = "查看单集 ›",
+            title = "进 度 " .. EpisodeProgressText, hint = "查看单集 ›",
             value = { "script-message-to", mp.get_script_name(), "bgm-open-episode-list" },
-            selectable = true,
-            keep_open = true },
-        {
-            title = "手动匹配",
-            value = { "script-message-to", mp.get_script_name(), "bgm-open-search-from-info" },
-            selectable = true,
-            keep_open = false,
-            actions = {
-            { name = "refresh", icon = "refresh", label = "根据当前匹配的番剧Id，重新获取单集信息" },
-            },
-            actions_place = "inside"
+            selectable = true, keep_open = true
         },
     }
-    -- 【修改】以下三项仅在已匹配到番剧时插入
+    -- 顺序：番剧信息 → 自动点格子 → 匹配模式 → 打开Bangumi → 手动匹配
     local is_matched = type(CurrentEpisodeInfo) == "table" and CurrentEpisodeInfo.episodeId ~= nil
     if is_matched then
         items[#items + 1] = {
+            title = "番剧信息", selectable = true,
+            value = { "script-message-to", mp.get_script_name(), "bgm-info-panel", "toggle" }
+        }
+        items[#items + 1] = {
             title = "自动点格子：" .. AutoMarkText, selectable = true, keep_open = true,
             value = { "script-message-to", mp.get_script_name(), "bgm-toggle-auto-mark" },
-            actions = { { name = "toggle_auto_mark", icon = AutoMarkIcon, label = "切换自动点格子" }, },
-            actions_place = "inside",
-        }
-        items[#items + 1] = {
-            title = "番剧信息", selectable = true,
-            value = { "script-message-to", mp.get_script_name(), "bgm-info-panel", "toggle" },
-        }
-        items[#items + 1] = {
-            title = "打开Bangumi", selectable = true,
-            value = { "script-message", "open-bangumi-url" },
+            actions = { { name = "toggle_auto_mark", icon = AutoMarkIcon, label = "切换自动点格子" } },
+            actions_place = "inside"
         }
     end
+    if IsNetworkPath then
+        items[#items + 1] = {
+            title = "匹配模式：" .. (NetworkModeText ~= "" and NetworkModeText or "未知"),
+            value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
+            selectable = true, keep_open = true,
+            actions = { { name = "toggle_network_mode", icon = NetworkModeIcon, label = "切换匹配模式" } },
+            actions_place = "inside"
+        }
+    end
+    if is_matched then
+        items[#items + 1] = {
+            title = "打开Bangumi", selectable = true,
+            value = { "script-message", "open-bangumi-url" }
+        }
+    end
+    items[#items + 1] = {
+        title = "手动匹配", selectable = true, keep_open = false,
+        value = { "script-message-to", mp.get_script_name(), "bgm-open-search-from-info" },
+        actions = { { name = "refresh", icon = "refresh", label = "根据当前匹配的番剧Id，重新获取单集信息" } },
+        actions_place = "inside"
+    }
+
     if EpisodeListMenu then
         -- 保留进度栏的位置与文字，由 uosc 在右侧展开子菜单。
         EpisodeListMenu.title = items[3].title
         items[3] = EpisodeListMenu
-    end
-    if IsNetworkPath then
-        table.insert(items, #items, {
-            title = "匹配模式：" .. (NetworkModeText ~= "" and NetworkModeText or "未知"),
-            value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
-            selectable = true,
-            keep_open = true,
-            actions = {
-                { name = "toggle_network_mode", icon = NetworkModeIcon, label = "切换匹配模式" },
-            },
-            actions_place = "inside",
-        })
     end
     return {
         type = "menu_bgm_info",
