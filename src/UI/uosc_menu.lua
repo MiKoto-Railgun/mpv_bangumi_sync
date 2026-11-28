@@ -239,8 +239,8 @@ local function build_info_menu_props(state)
             value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
             keep_open = true },
         {
-            title = status_title, italic = status_italic,
-            muted = status_muted, icon = status_icon,
+            title = status_title, italic = status_italic, muted = status_muted, icon = status_icon,
+            hint = state.MatchError == "BangumiEpisodeNotFound" and "单集映射缺失，建议手动匹配" or nil,
             value = { "script-message-to", mp.get_script_name(), "bgm-noop" },
             keep_open = true, selectable = EpisodeUpdating and false or nil,
             actions = status_actions, actions_place = "inside" },

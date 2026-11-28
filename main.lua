@@ -19,6 +19,7 @@ local ui_info = require "src.UI.draw_menu"
 local manual_binding = require "src.services.manual_binding"
 local PendingBgmEpisodes = nil
 local BgmEpisodeMenuSerial = 0
+local DandanSearchSerial = 0
 local SearchSerial = 0
 
 mp.msg.info(string.format("%s v%s loaded", SCRIPT_NAME, SCRIPT_VERSION))
@@ -50,6 +51,7 @@ local EpisodeListRequest = 0
 local CancelEpisodeList = nil
 local ProgressUpdating = false
 local NotInStorage = false
+local InitSerial = 0
 
 
 local function cancel_episode_list()
@@ -433,6 +435,8 @@ local function init(episode_id, opts)
     update_network_mode_text()
     MatchInProgress = true
     update_info_menu_view() -- 菜单已开则立即切换为加载中视图
+    InitSerial = InitSerial + 1
+    local my_serial = InitSerial
     local stream_mode = network_mode == "stream"
     local network_file_mode = network_mode == "file"
     local context_service = stream_mode and stream_context or sync_context
@@ -444,6 +448,10 @@ local function init(episode_id, opts)
         remote_url = network_file_mode and current_path or nil,
         remote_path_key = network_file_mode and utils.stable_url_key(current_path) or nil,
     }, function(result)
+        if my_serial ~= InitSerial then
+            mp.msg.verbose("忽略过期的匹配回调（文件或模式已切换）")
+            return
+        end
         MatchInProgress = false
         update_info_menu_view() -- 匹配结束（成功/失败/select 分支均覆盖），刷新为最终状态
         if result and result.status == "select_subject" then
@@ -616,24 +624,7 @@ flush_pending_updates = function(reason, opts)
         end
     end)
 end
-
-local function update_info_menu_view()
-    ui_menu.update_info_menu({
-        NotInStorage = NotInStorage,
-        EpisodesData = CurrentEpContext and CurrentEpContext.episodes_data,
-        UoscAvailable = UoscAvailable,
-        CurrentEpisodeInfo = CurrentEpisodeInfo,
-        EpisodeStatusText = EpisodeStatusText,
-        EpisodeProgressText = EpisodeProgressText,
-        AutoMarkText = AutoMarkText,
-        IsNetworkPath = is_current_stream(),
-        NetworkModeText = NetworkModeText,
-        EpisodeUpdating = ProgressUpdating,
-        MatchInProgress = MatchInProgress,
-    })
-end
-
-local function get_info_menu_state()
+local function get_menu_state()
     return {
         NotInStorage = NotInStorage,
         EpisodesData = CurrentEpContext and CurrentEpContext.episodes_data,
@@ -646,7 +637,12 @@ local function get_info_menu_state()
         NetworkModeText = NetworkModeText,
         EpisodeUpdating = ProgressUpdating,
         MatchInProgress = MatchInProgress,
+        MatchError = CurrentEpContext and CurrentEpContext.match_error or nil,
     }
+end
+
+local function update_info_menu_view()
+    ui_menu.update_info_menu(get_menu_state())
 end
 
 local function update_local_episode_status(context, episode_item, status)
@@ -727,7 +723,10 @@ mark_current_episode_status = function(opts)
             return
         end
         if result.uncollected then
-            if is_manual then mp.osd_message("当前番剧未收藏", 2) end
+            if is_manual then
+                mp.osd_message("当前番剧未收藏", 2)
+                ui_menu.open_info_menu(get_menu_state())
+            end
             return
         end
         if result.collection_completed then
@@ -761,6 +760,7 @@ mark_current_episode_status = function(opts)
         elseif is_manual then
             mp.osd_message(compose_sync_message(collection_update_message,
                 "已标记为" .. ((status == 2) and "已看" or "未看")), 2)
+            ui_menu.open_info_menu(get_menu_state())
         else
             local message = compose_sync_message(collection_update_message, "同步Bangumi追番进度成功")
             mp.msg.info(message:gsub("\n", " | "))
@@ -836,10 +836,9 @@ mp.register_event("end-file", function(event)
     cancel_episode_list()
     ui_menu.clear_episode_list()
     mp.commandv("script-message-to", "uosc", "close-menu", "menu_bgm_info")
+    InitSerial = InitSerial + 1
     MatchInProgress = false
-    if not event then
-        return
-    end
+    if not event then return end
     if event.reason == "quit" then
         flush_pending_updates(event.reason, {detach = true})
     end
@@ -856,7 +855,7 @@ local key_bindings = {
 }
 for key, binding in pairs(key_bindings) do
     table.insert(binding, 1, "script-message")
-    local desc = table.concat(binding, "", 2)
+    local desc = binding[2]
     mp.msg.verbose("key:", key, "binding:", binding[2], "desc:", desc)
     mp.add_key_binding(key, desc, function() mp.command_native(binding) end)
 end
@@ -872,7 +871,7 @@ mp.register_script_message("open-bangumi-url", function()
 end)
 
 mp.register_script_message("open-bangumi-info", function()
-    ui_menu.open_info_menu(get_info_menu_state())
+    ui_menu.open_info_menu(get_menu_state())
 end)
 
 mp.register_script_message("bgm-toggle-auto-mark", function()
@@ -907,7 +906,7 @@ local function get_episode_list_cached(context)
     end
 end
 
-function broadcast_watch_status(context, episodes)
+local function broadcast_watch_status(context, episodes)
     if not context or not context.bgm_id or type(episodes) ~= "table" then return end
     local coll_watched = episode_status.collection_is_watched(episodes.collection)
     local watched = {}
@@ -934,7 +933,7 @@ mp.register_script_message("bgm-open-episode-list", function()
   cancel_episode_list()
   local request = EpisodeListRequest
   local context = CurrentEpContext
-  local state = get_info_menu_state()
+  local state = get_menu_state()
   if not context or not context.bgm_id then
     ui_menu.show_episode_list(state, nil, "尚未匹配番剧，请返回后手动匹配")
     return
@@ -962,7 +961,7 @@ mp.register_script_message("bgm-open-episode-list", function()
         json_store.write(context.episodes_path, episodes, {atomic = true})
       end
     end
-    state = get_info_menu_state()
+    state = get_menu_state()
     state.EpisodesData = episodes
     state.EpisodeListFailed = episodes == nil
     ui_menu.show_episode_list(state, episodes, "加载失败，请重试", true)
@@ -1063,7 +1062,7 @@ mp.register_script_message("bgm-info-menu-event", function(payload)
     end
     if event.action == "edit_status" then
     mp.commandv("script-message-to", "uosc", "close-menu", "menu_bgm_info")
-    ui_menu.open_episode_status_menu(get_info_menu_state())
+    ui_menu.open_episode_status_menu(get_menu_state())
     return
   end
   if event.action == "toggle_network_mode" then
@@ -1103,7 +1102,7 @@ end)
 mp.register_script_message("bgm-back-info-menu", function()
   cancel_episode_list()
   mp.commandv("script-message-to", "uosc", "close-menu", "menu_bgm_status")
-  ui_menu.open_info_menu(get_info_menu_state())
+  ui_menu.open_info_menu(get_menu_state())
 end)
 
 mp.register_script_message("bgm-set-episode-status", function(status)
@@ -1172,6 +1171,8 @@ mp.register_script_message("bgm-search-anime", function(query)
     items = { ui_menu.format_menu_item("加载中...") },
   })
 
+    DandanSearchSerial = DandanSearchSerial + 1
+    local serial = DandanSearchSerial
     dandanplay_service.dandanplay_search(query, function(data, err)
         if not data then
             mp.msg.error("搜索番剧失败:", err)
