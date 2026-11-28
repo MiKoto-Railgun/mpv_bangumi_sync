@@ -47,6 +47,7 @@ local compose_sync_message
 local update_episode_status_from_cache
 local reconcile_update_timer
 local mark_current_episode_status
+local update_info_menu_view
 local EpisodeListRequest = 0
 local CancelEpisodeList = nil
 local ProgressUpdating = false
@@ -641,7 +642,7 @@ local function get_menu_state()
     }
 end
 
-local function update_info_menu_view()
+update_info_menu_view = function()
     ui_menu.update_info_menu(get_menu_state())
 end
 
