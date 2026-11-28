@@ -203,6 +203,18 @@ portable_config/script-data/mpv_bangumi_sync/
 
 该目录用于保存弹弹play id、Bangumi 条目、剧集信息和手动绑定结果。通常不需要手动修改。
 
+### 自定义数据目录
+
+如果需要把数据存到其他位置（例如独立数据盘、与 mpv 配置目录分离备份，或多个 mpv 安装共享同一份匹配缓存），可在 `script-opts/mpv_bangumi_sync.conf` 中设置 `data_path` ，留空使用默认，支持绝对路径和相对路径
+
+```conf
+data_path=~~/script-data/mpv_bangumi_sync
+```
+
+
+
+
+
 ## 注意
 
 - 本插件主要在 Windows 10 环境测试，其他系统未充分验证。
