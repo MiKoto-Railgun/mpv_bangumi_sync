@@ -97,8 +97,8 @@ local function sync_legacy_globals_from_current_ep_context()
 end
 
 local function reset_current_ep_context()
-  CurrentEpContext = nil
-  sync_legacy_globals_from_current_ep_context()
+    CurrentEpContext = nil
+    sync_legacy_globals_from_current_ep_context()
 end
 
 local function reset_globals()
@@ -328,56 +328,56 @@ compose_sync_message = function(collection_update_message, sync_message)
 end
 
 local function set_current_ep_context(context)
-  context = context or {}
-  local episode_info = context.episode_info
-  local anime_info = context.anime_info
-  local bgm_id = context.bgm_id or (anime_info and anime_info.bgm_id)
-  local runtime_episode_id = context.episode_id or (episode_info and episode_info.episodeId)
-  if anime_info then
-    anime_info.bgm_id = bgm_id
-    anime_info.bgm_url = context.bgm_url
-  end
-  CurrentEpContext = {
-    matched = false,
-    match_error = nil,
-    anime_info = anime_info,
-    episode_info = episode_info,
-    bgm_id = bgm_id,
-    bgm_url = context.bgm_url,
-    storage = context.storage,
-    runtime_episode_id = runtime_episode_id,
-    episodes_path = runtime_episode_id and db.get_path(runtime_episode_id,
-      episode_info and episode_info.manualEpisode and "episodes_all" or "episodes") or nil,
-    episodes_data = context.episodes,
-    episodes_ready = false,
-    bgm_episode_id = episode_info and tonumber(episode_info.bgmEpisodeId) or nil,
-    episode_item = nil,
-    status_text = "未获取",
-    progress_text = "未获取",
-    watched = false,
-  }
-  update_episode_status_from_cache(context.episodes)
-  sync_legacy_globals_from_current_ep_context()
-  return CurrentEpContext
+    context = context or {}
+    local episode_info = context.episode_info
+    local anime_info = context.anime_info
+    local bgm_id = context.bgm_id or (anime_info and anime_info.bgm_id)
+    local runtime_episode_id = context.episode_id or (episode_info and episode_info.episodeId)
+    if anime_info then
+        anime_info.bgm_id = bgm_id
+        anime_info.bgm_url = context.bgm_url
+    end
+    CurrentEpContext = {
+        matched = false,
+        match_error = nil,
+        anime_info = anime_info,
+        episode_info = episode_info,
+        bgm_id = bgm_id,
+        bgm_url = context.bgm_url,
+        storage = context.storage,
+        runtime_episode_id = runtime_episode_id,
+        episodes_path = runtime_episode_id and db.get_path(runtime_episode_id,
+          episode_info and episode_info.manualEpisode and "episodes_all" or "episodes") or nil,
+        episodes_data = context.episodes,
+        episodes_ready = false,
+        bgm_episode_id = episode_info and tonumber(episode_info.bgmEpisodeId) or nil,
+        episode_item = nil,
+        status_text = "未获取",
+        progress_text = "未获取",
+        watched = false,
+    }
+    update_episode_status_from_cache(context.episodes)
+    sync_legacy_globals_from_current_ep_context()
+    return CurrentEpContext
 end
 
 local function log_context_loaded_summary()
-  local info = CurrentEpisodeInfo or {}
-  local anime_title = info.animeTitle or "未知番剧"
-  local episode_title = info.episodeTitle or "未知单集"
-  local episode_ep = tonumber(info.episodeEp)
-  local episode_part = episode_ep and ("第" .. tostring(episode_ep) .. "话 ") or ""
+    local info = CurrentEpisodeInfo or {}
+    local anime_title = info.animeTitle or "未知番剧"
+    local episode_title = info.episodeTitle or "未知单集"
+    local episode_ep = tonumber(info.episodeEp)
+    local episode_part = episode_ep and ("第" .. tostring(episode_ep) .. "话 ") or ""
 
-  local result_text = EpisodesReady and "番剧信息加载成功" or "番剧信息加载完成（剧集状态未就绪）"
-  mp.msg.info(
-    string.format(
-      "%s-%s%s %s",
-      anime_title,
-      episode_part,
-      episode_title,
-      result_text
+    local result_text = EpisodesReady and "番剧信息加载成功" or "番剧信息加载完成（剧集状态未就绪）"
+    mp.msg.info(
+        string.format(
+            "%s-%s%s %s",
+            anime_title,
+            episode_part,
+            episode_title,
+            result_text
+        )
     )
-  )
 end
 
 update_episode_status_from_cache = function(episodes_data)
@@ -472,6 +472,7 @@ local function init(episode_id, opts)
                 if result.reason == "NotInStorage" then
                     NotInStorage = true
                     mp.msg.verbose("视频不在配置的存储路径内，跳过初始化")
+                    update_info_menu_view() -- 补一次：置位发生在顶部刷新之后
                     return
                 end
                 if result.reason == "InvalidPath" then
@@ -496,6 +497,7 @@ local function init(episode_id, opts)
             "Bangumi Url:", AnimeInfo and AnimeInfo.bgm_url)
         log_context_loaded_summary()
         reconcile_update_timer()
+        update_info_menu_view() -- 顶部刷新发生在上下文写入前；菜单开着时在此原地切换为匹配结果
     end)
 end
 
